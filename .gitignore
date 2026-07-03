@@ -1,0 +1,11 @@
+# Compiled binary (matches the module name)
+/goodreads-nextread
+
+# Go build/test artifacts
+*.exe
+*.out
+*.test
+
+# Local editor / OS / tooling
+.DS_Store
+.claude/

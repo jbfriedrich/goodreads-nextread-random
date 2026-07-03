@@ -1,0 +1,23 @@
+services:
+  nextbook:
+    build: .
+    # Or, if you build & push the image separately, use it instead of `build`:
+    # image: your-registry/nextbook:latest
+    container_name: nextbook
+    restart: unless-stopped
+
+    # nginx inside the container listens on 80. SSL is terminated upstream by
+    # your existing setup, so publish it on a host port and point your proxy at it.
+    ports:
+      - "8080:80"
+
+    # Optional: swap the shelf without rebuilding the image.
+    # volumes:
+    #   - ./config.yaml:/app/config.yaml:ro
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

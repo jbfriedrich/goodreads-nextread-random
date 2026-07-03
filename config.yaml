@@ -1,0 +1,5 @@
+# The Goodreads shelf URL, copied from your browser.
+# Replace YOUR_USER_ID with your Goodreads user id (the number in the URL);
+# the shelf must be public. The tool derives the RSS endpoint
+# (/review/list_rss/...) from this automatically.
+list_url: "https://www.goodreads.com/review/list/YOUR_USER_ID?shelf=to-read"
