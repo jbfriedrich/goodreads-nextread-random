@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -9,90 +10,74 @@ import (
 	"time"
 )
 
-func TestShelfCacheFetchesOnceWithinTTL(t *testing.T) {
-	calls := 0
-	now := time.Unix(1000, 0)
-	c := &shelfCache{
-		ttl: time.Minute,
-		now: func() time.Time { return now },
-		fetch: func() ([]Book, error) {
-			calls++
-			return []Book{{Title: "A"}}, nil
-		},
-	}
-
-	for i := 0; i < 3; i++ {
-		if _, err := c.get(); err != nil {
-			t.Fatalf("get: %v", err)
-		}
-	}
-	if calls != 1 {
-		t.Errorf("fetch called %d times within TTL, want 1", calls)
+func TestShelfCacheGetIsEmptyBeforeRefresh(t *testing.T) {
+	c := &shelfCache{fetch: func() ([]Book, error) { return []Book{{Title: "A"}}, nil }}
+	if books := c.get(); len(books) != 0 {
+		t.Errorf("expected empty cache before any refresh, got %v", books)
 	}
 }
 
-func TestShelfCacheRefetchesAfterTTL(t *testing.T) {
-	calls := 0
-	now := time.Unix(1000, 0)
-	c := &shelfCache{
-		ttl: time.Minute,
-		now: func() time.Time { return now },
-		fetch: func() ([]Book, error) {
-			calls++
-			return []Book{{Title: "A"}}, nil
-		},
+func TestShelfCacheRefreshPopulatesAndSwaps(t *testing.T) {
+	list := []Book{{Title: "first"}}
+	c := &shelfCache{fetch: func() ([]Book, error) { return list, nil }}
+
+	if err := c.refresh(); err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+	if got := c.get(); len(got) != 1 || got[0].Title != "first" {
+		t.Fatalf("after first refresh got %v", got)
 	}
 
-	if _, err := c.get(); err != nil {
-		t.Fatal(err)
+	// A later refresh should swap in the new shelf.
+	list = []Book{{Title: "second"}, {Title: "third"}}
+	if err := c.refresh(); err != nil {
+		t.Fatalf("second refresh: %v", err)
 	}
-	now = now.Add(2 * time.Minute)
-	if _, err := c.get(); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 2 {
-		t.Errorf("fetch called %d times across TTL boundary, want 2", calls)
+	if got := c.get(); len(got) != 2 || got[0].Title != "second" {
+		t.Errorf("after second refresh got %v", got)
 	}
 }
 
-func TestShelfCacheServesStaleOnRefreshError(t *testing.T) {
-	now := time.Unix(1000, 0)
+func TestShelfCacheRefreshKeepsPreviousListOnError(t *testing.T) {
 	fail := false
-	c := &shelfCache{
-		ttl: time.Minute,
-		now: func() time.Time { return now },
-		fetch: func() ([]Book, error) {
-			if fail {
-				return nil, errors.New("network down")
-			}
-			return []Book{{Title: "cached"}}, nil
-		},
-	}
+	c := &shelfCache{fetch: func() ([]Book, error) {
+		if fail {
+			return nil, errors.New("network down")
+		}
+		return []Book{{Title: "good"}}, nil
+	}}
 
-	if _, err := c.get(); err != nil {
+	if err := c.refresh(); err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(2 * time.Minute)
 	fail = true
-
-	books, err := c.get()
-	if err != nil {
-		t.Fatalf("expected stale data served without error, got %v", err)
+	if err := c.refresh(); err == nil {
+		t.Fatal("expected error from failing refresh, got nil")
 	}
-	if len(books) != 1 || books[0].Title != "cached" {
-		t.Errorf("expected stale cached book, got %v", books)
+	// The last known-good list must still be served.
+	if got := c.get(); len(got) != 1 || got[0].Title != "good" {
+		t.Errorf("expected previous list retained on error, got %v", got)
 	}
 }
 
-func TestShelfCacheErrorsWhenColdFetchFails(t *testing.T) {
-	now := time.Unix(1000, 0)
-	c := &shelfCache{
-		ttl:   time.Minute,
-		now:   func() time.Time { return now },
-		fetch: func() ([]Book, error) { return nil, errors.New("boom") },
-	}
-	if _, err := c.get(); err == nil {
-		t.Fatal("expected error on cold fetch failure, got nil")
+func TestShelfCacheRunRefreshesUntilCancelled(t *testing.T) {
+	calls := make(chan struct{}, 8)
+	c := &shelfCache{fetch: func() ([]Book, error) {
+		calls <- struct{}{}
+		return []Book{{Title: "x"}}, nil
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.run(ctx, time.Millisecond)
+
+	// The ticker should drive several refreshes.
+	for i := 0; i < 3; i++ {
+		select {
+		case <-calls:
+		case <-time.After(time.Second):
+			t.Fatalf("expected background refresh %d to fire", i+1)
+		}
 	}
 }
 
@@ -135,10 +120,9 @@ func TestRenderPageEscapesTitle(t *testing.T) {
 }
 
 func TestBookHandlerServesRandomBook(t *testing.T) {
-	cache := &shelfCache{
-		ttl:   time.Minute,
-		now:   time.Now,
-		fetch: func() ([]Book, error) { return []Book{{Title: "Only Book", BookID: "1"}}, nil },
+	cache := &shelfCache{fetch: func() ([]Book, error) { return []Book{{Title: "Only Book", BookID: "1"}}, nil }}
+	if err := cache.refresh(); err != nil {
+		t.Fatalf("priming cache: %v", err)
 	}
 	h := bookHandler(cache)
 
@@ -157,12 +141,9 @@ func TestBookHandlerServesRandomBook(t *testing.T) {
 	}
 }
 
-func TestBookHandlerReturns503OnFetchFailure(t *testing.T) {
-	cache := &shelfCache{
-		ttl:   time.Minute,
-		now:   time.Now,
-		fetch: func() ([]Book, error) { return nil, errors.New("down") },
-	}
+func TestBookHandlerReturns503WhenListEmpty(t *testing.T) {
+	// Cache never primed (e.g. startup fetch has not populated it yet).
+	cache := &shelfCache{fetch: func() ([]Book, error) { return nil, errors.New("down") }}
 	h := bookHandler(cache)
 
 	rec := httptest.NewRecorder()

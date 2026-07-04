@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDeriveRSSURL(t *testing.T) {
@@ -87,6 +88,50 @@ func TestLoadConfig(t *testing.T) {
 	t.Run("file not found", func(t *testing.T) {
 		if _, err := loadConfig(filepath.Join(dir, "does-not-exist.yaml")); err == nil {
 			t.Fatal("expected error for missing file, got nil")
+		}
+	})
+
+	t.Run("refresh interval defaults to 30m when omitted", func(t *testing.T) {
+		path := filepath.Join(dir, "default-interval.yaml")
+		writeFile(t, path, "list_url: \"https://www.goodreads.com/review/list/12345678?shelf=to-read\"\n")
+
+		cfg, err := loadConfig(path)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.RefreshInterval != 30*time.Minute {
+			t.Errorf("RefreshInterval = %v, want 30m", cfg.RefreshInterval)
+		}
+	})
+
+	t.Run("custom refresh interval is parsed", func(t *testing.T) {
+		path := filepath.Join(dir, "custom-interval.yaml")
+		writeFile(t, path, "list_url: \"https://www.goodreads.com/review/list/12345678?shelf=to-read\"\nrefresh_interval: \"45m\"\n")
+
+		cfg, err := loadConfig(path)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.RefreshInterval != 45*time.Minute {
+			t.Errorf("RefreshInterval = %v, want 45m", cfg.RefreshInterval)
+		}
+	})
+
+	t.Run("invalid refresh interval is rejected", func(t *testing.T) {
+		path := filepath.Join(dir, "bad-interval.yaml")
+		writeFile(t, path, "list_url: \"https://www.goodreads.com/review/list/12345678?shelf=to-read\"\nrefresh_interval: \"soon\"\n")
+
+		if _, err := loadConfig(path); err == nil {
+			t.Fatal("expected error for invalid refresh_interval, got nil")
+		}
+	})
+
+	t.Run("non-positive refresh interval is rejected", func(t *testing.T) {
+		path := filepath.Join(dir, "zero-interval.yaml")
+		writeFile(t, path, "list_url: \"https://www.goodreads.com/review/list/12345678?shelf=to-read\"\nrefresh_interval: \"0s\"\n")
+
+		if _, err := loadConfig(path); err == nil {
+			t.Fatal("expected error for non-positive refresh_interval, got nil")
 		}
 	})
 }

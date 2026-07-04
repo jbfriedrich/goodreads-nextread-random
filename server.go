@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"html/template"
@@ -13,40 +14,56 @@ import (
 	"time"
 )
 
-// shelfCache holds the shelf's books in memory and refreshes them lazily once
-// the TTL elapses. On a refresh failure it keeps serving the last good copy.
+// shelfCache holds the shelf's books in memory. The list is primed once at
+// startup and refreshed by a background goroutine (see run), so requests never
+// block on the network. On a refresh failure it keeps serving the last good
+// copy.
 type shelfCache struct {
 	fetch func() ([]Book, error)
-	ttl   time.Duration
-	now   func() time.Time
 
-	mu        sync.Mutex
-	books     []Book
-	fetchedAt time.Time
+	mu    sync.RWMutex
+	books []Book
 }
 
-// get returns the cached books, refreshing them when the TTL has elapsed.
-func (c *shelfCache) get() ([]Book, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	fresh := c.books != nil && c.now().Sub(c.fetchedAt) < c.ttl
-	if fresh {
-		return c.books, nil
-	}
-
+// refresh fetches the shelf and swaps in the new list. On failure it leaves the
+// existing list in place and returns the error, so callers can keep serving the
+// last known-good copy.
+func (c *shelfCache) refresh() error {
 	books, err := c.fetch()
 	if err != nil {
-		if c.books != nil {
-			// Serve stale data rather than failing the request.
-			return c.books, nil
-		}
-		return nil, err
+		return err
 	}
 
+	c.mu.Lock()
 	c.books = books
-	c.fetchedAt = c.now()
-	return c.books, nil
+	c.mu.Unlock()
+	return nil
+}
+
+// get returns the current in-memory shelf without triggering a fetch. It never
+// blocks on the network; the background refresher keeps the list current.
+func (c *shelfCache) get() []Book {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.books
+}
+
+// run refreshes the shelf every interval until ctx is cancelled. A failed
+// refresh is logged and the previous list is retained.
+func (c *shelfCache) run(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := c.refresh(); err != nil {
+				log.Printf("background shelf refresh failed, keeping previous list: %v", err)
+			}
+		}
+	}
 }
 
 // bookHandler serves a random book from the cache as an HTML page.
@@ -57,14 +74,9 @@ func bookHandler(cache *shelfCache) http.Handler {
 			return
 		}
 
-		books, err := cache.get()
-		if err != nil {
-			log.Printf("fetching shelf: %v", err)
-			http.Error(w, "Could not load the reading list right now. Try again shortly.", http.StatusServiceUnavailable)
-			return
-		}
+		books := cache.get()
 		if len(books) == 0 {
-			http.Error(w, "The reading list is empty.", http.StatusServiceUnavailable)
+			http.Error(w, "The reading list is not available right now. Try again shortly.", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -121,7 +133,7 @@ func serveCmd(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	configPath := fs.String("config", "config.yaml", "path to config file")
 	addr := fs.String("addr", envOr("ADDR", ":8080"), "address to listen on")
-	ttl := fs.Duration("cache-ttl", 15*time.Minute, "how long to cache the shelf")
+	refresh := fs.Duration("refresh-interval", 0, "how often to refresh the shelf in the background (0 = use config)")
 	fs.Parse(args)
 
 	cfg, err := loadConfig(*configPath)
@@ -129,14 +141,30 @@ func serveCmd(args []string) error {
 		return err
 	}
 
+	interval := cfg.RefreshInterval
+	if *refresh > 0 {
+		interval = *refresh
+	}
+
 	cache := &shelfCache{
-		ttl: *ttl,
-		now: time.Now,
 		fetch: func() ([]Book, error) {
 			log.Printf("refreshing shelf from %s", cfg.RSSURL)
 			return fetchShelf(cfg.RSSURL)
 		},
 	}
+
+	// Prime the shelf before accepting traffic so no visitor waits on the
+	// initial fetch. A failure here is fatal: the container's restart policy
+	// will retry the startup.
+	log.Printf("priming shelf before serving...")
+	if err := cache.refresh(); err != nil {
+		return fmt.Errorf("priming shelf on startup: %w", err)
+	}
+
+	// Keep the shelf current in the background so requests never block on
+	// Goodreads and shelf changes get picked up within one interval.
+	go cache.run(context.Background(), interval)
+	log.Printf("shelf primed; refreshing every %s in the background", interval)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", bookHandler(cache))
