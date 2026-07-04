@@ -59,11 +59,28 @@ shelf with the same info as the CLI, plus the cover image.
 
 Architecture (one container): **nginx** listens on port 80 and reverse-proxies
 to a small **Go** HTTP server on `127.0.0.1:8080` that renders a random book per
-request. The Go server caches the whole shelf in memory (default 15 min TTL) so
-it doesn't hit Goodreads on every request, and serves the last good copy if a
-refresh fails. SSL is expected to be terminated upstream by your existing setup.
+request. SSL is expected to be terminated upstream by your existing setup.
 
 The shelf comes from the same `config.yaml`, which is baked into the image.
+
+**Shelf caching (why the site is fast).** The Go server keeps the whole shelf in
+memory so it never hits Goodreads on the request path:
+
+- **Primed at startup** — the shelf is fetched once *before* the server accepts
+  traffic, so no visitor ever waits on the initial (slow) Goodreads fetch. The
+  container takes a little longer to become ready in exchange. If this initial
+  fetch fails, the process exits and the container's restart policy retries.
+- **Refreshed in the background** — a goroutine re-fetches the shelf on an
+  interval (default 30 min, set `refresh_interval` in `config.yaml`), so shelf
+  changes show up within one interval. Refreshes happen off the request path.
+- **Stale-on-failure** — if a background refresh fails (Goodreads down or
+  throttling), the error is logged and the last known-good list keeps being
+  served, so a Goodreads hiccup never takes the site down.
+- **Random per request** — every visit independently picks a random book from
+  the in-memory list, so reloading always gives a fresh pick.
+
+The net effect: the ~20s cold fetch is paid once at container startup instead of
+by whichever visitor happens to arrive after an idle period.
 
 ### Build and push
 
@@ -89,8 +106,11 @@ at the container's port 80. Health check: `GET /healthz` → `ok`.
 
 - **Different shelf without rebuilding:** mount your own config over the baked
   one — `-v /path/to/config.yaml:/app/config.yaml:ro`.
-- **Cache TTL / listen address:** the server accepts `--cache-ttl` and `--addr`
-  (or the `ADDR` env var); defaults are fine for the container.
+- **Background refresh interval:** set `refresh_interval` in `config.yaml`
+  (a Go duration like `"30m"`, `"1h"`; default 30 min). A `--refresh-interval`
+  flag overrides the config value when set.
+- **Listen address:** the server accepts `--addr` (or the `ADDR` env var);
+  the default is fine for the container.
 
 ### Run the server locally (no Docker)
 

@@ -3,3 +3,8 @@
 # the shelf must be public. The tool derives the RSS endpoint
 # (/review/list_rss/...) from this automatically.
 list_url: "https://www.goodreads.com/review/list/YOUR_USER_ID?shelf=to-read"
+
+# Web server only: how often the shelf is refreshed from Goodreads in the
+# background. Accepts a Go duration (e.g. "30m", "1h", "90m"). Optional;
+# defaults to 30m. Has no effect on the CLI.
+refresh_interval: "30m"
