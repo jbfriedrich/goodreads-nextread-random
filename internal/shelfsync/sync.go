@@ -1,41 +1,46 @@
-package main
+package shelfsync
 
 import (
 	"context"
 	"fmt"
 	"log"
 	"time"
+
+	"goodreads-nextread/internal/goodreads"
+	"goodreads-nextread/internal/store"
 )
 
-// defaultFullEvery is how often a full harvest runs even when quick checks
+// DefaultFullEvery is how often a full harvest runs even when quick checks
 // see no change — a safety net for edits the quick check cannot see. The
 // quick check's count arithmetic catches every case known so far, so weekly
 // is enough.
-const defaultFullEvery = 7 * 24 * time.Hour
+const DefaultFullEvery = 7 * 24 * time.Hour
 
 // failedRetryAfter caps the wait before retrying after a failed sync.
 const failedRetryAfter = time.Hour
 
-// syncer keeps the stored shelf in line with Goodreads.
-type syncer struct {
-	gr          *grClient
-	store       *store
+// Syncer keeps the stored shelf in line with Goodreads.
+type Syncer struct {
+	gr          *goodreads.Client
+	store       *store.Store
 	maxRequests int
 	fullEvery   time.Duration
 	now         func() time.Time
 
-	// onProgress, if set, is called each time a batch of an initial harvest
+	// OnProgress, if set, is called each time a batch of an initial harvest
 	// (into an empty store) has been saved, so the server can start serving
 	// before the whole shelf is in.
-	onProgress func()
+	OnProgress func()
 }
 
-func newSyncer(cfg *Config, st *store) *syncer {
-	return &syncer{
-		gr:          newGRClient(cfg, cfg.RequestDelay),
+// New builds a Syncer that harvests with gr (at most maxRequests per full
+// harvest) into st.
+func New(gr *goodreads.Client, st *store.Store, maxRequests int) *Syncer {
+	return &Syncer{
+		gr:          gr,
 		store:       st,
-		maxRequests: cfg.MaxRequests,
-		fullEvery:   defaultFullEvery,
+		maxRequests: maxRequests,
+		fullEvery:   DefaultFullEvery,
 		now:         time.Now,
 	}
 }
@@ -51,12 +56,12 @@ func newSyncer(cfg *Config, st *store) *syncer {
 // A full harvest also runs when the store is empty, the last one is older than
 // fullEvery, or forceFull is set. Books are only deleted when the harvest is
 // complete; a failure leaves the store untouched.
-func (s *syncer) sync(ctx context.Context, forceFull bool) (syncRun, error) {
-	run := syncRun{StartedAt: s.now()}
-	startRequests := s.gr.requestCount()
-	finish := func(err error) (syncRun, error) {
+func (s *Syncer) Sync(ctx context.Context, forceFull bool) (store.SyncRun, error) {
+	run := store.SyncRun{StartedAt: s.now()}
+	startRequests := s.gr.RequestCount()
+	finish := func(err error) (store.SyncRun, error) {
 		run.FinishedAt = s.now()
-		run.Requests = s.gr.requestCount() - startRequests
+		run.Requests = s.gr.RequestCount() - startRequests
 		if err != nil {
 			run.Status = "failed"
 			run.Err = err.Error()
@@ -81,11 +86,11 @@ func (s *syncer) sync(ctx context.Context, forceFull bool) (syncRun, error) {
 	needFull := forceFull || stored == 0 || !haveFull || s.now().Sub(lastFull) >= s.fullEvery
 	if !needFull {
 		run.Kind = "quick"
-		expected, newest, err := s.gr.quickCheck(ctx)
+		expected, newest, err := s.gr.QuickCheck(ctx)
 		if err != nil {
 			return finish(err)
 		}
-		var unknown []Book
+		var unknown []goodreads.Book
 		for _, b := range newest {
 			known, err := s.store.HasAll([]string{b.ReviewID})
 			if err != nil {
@@ -119,20 +124,20 @@ func (s *syncer) sync(ctx context.Context, forceFull bool) (syncRun, error) {
 	// first books are servable within seconds and a failure keeps what was
 	// fetched. Later harvests stay all-or-nothing: a half-reconciled shelf
 	// would be worse than the previous complete one.
-	var onBatch func([]Book) error
+	var onBatch func([]goodreads.Book) error
 	progressive := stored == 0
 	if progressive {
-		onBatch = func(batch []Book) error {
+		onBatch = func(batch []goodreads.Book) error {
 			if _, _, err := s.store.Reconcile(batch, false, s.now()); err != nil {
 				return fmt.Errorf("saving shelf: %w", err)
 			}
-			if s.onProgress != nil {
-				s.onProgress()
+			if s.OnProgress != nil {
+				s.OnProgress()
 			}
 			return nil
 		}
 	}
-	res, err := s.gr.harvest(ctx, s.maxRequests, onBatch)
+	res, err := s.gr.Harvest(ctx, s.maxRequests, onBatch)
 	run.Expected, run.Found = res.Expected, len(res.Books)
 	if err != nil {
 		return finish(err)
@@ -156,19 +161,8 @@ func (s *syncer) sync(ctx context.Context, forceFull bool) (syncRun, error) {
 	return finish(nil)
 }
 
-// describe renders a run as a one-line summary for logs and the CLI.
-func (r syncRun) describe() string {
-	s := fmt.Sprintf("%s sync %s: expected=%d found=%d added=%d removed=%d requests=%d (%s)",
-		r.Kind, r.Status, r.Expected, r.Found, r.Added, r.Removed, r.Requests,
-		r.FinishedAt.Sub(r.StartedAt).Round(time.Second))
-	if r.Err != "" {
-		s += ": " + r.Err
-	}
-	return s
-}
-
 // storeSummary describes the stored shelf for log lines.
-func (s *syncer) storeSummary() string {
+func (s *Syncer) storeSummary() string {
 	n, err := s.store.Count()
 	if err != nil {
 		return "stored count unavailable: " + err.Error()
@@ -180,7 +174,7 @@ func (s *syncer) storeSummary() string {
 // untilNext returns how long to wait before the next scheduled sync, based on
 // the run log so that restarts do not cause extra scrapes. After a failure the
 // wait is capped at failedRetryAfter.
-func (s *syncer) untilNext(interval time.Duration) time.Duration {
+func (s *Syncer) UntilNext(interval time.Duration) time.Duration {
 	last, ok, err := s.store.LastRun()
 	if err != nil || !ok {
 		return 0
@@ -196,9 +190,9 @@ func (s *syncer) untilNext(interval time.Duration) time.Duration {
 
 // loop runs scheduled syncs until ctx is cancelled, calling onSynced after
 // every successful run so the in-memory cache can reload from the store.
-func (s *syncer) loop(ctx context.Context, interval time.Duration, onSynced func()) {
+func (s *Syncer) Loop(ctx context.Context, interval time.Duration, onSynced func()) {
 	for {
-		wait := s.untilNext(interval)
+		wait := s.UntilNext(interval)
 		if wait > 0 {
 			log.Printf("next shelf sync in %s", wait.Round(time.Second))
 		}
@@ -210,15 +204,15 @@ func (s *syncer) loop(ctx context.Context, interval time.Duration, onSynced func
 		case <-timer.C:
 		}
 
-		run, err := s.sync(ctx, false)
+		run, err := s.Sync(ctx, false)
 		if ctx.Err() != nil {
 			return
 		}
 		if err != nil {
-			log.Printf("shelf sync failed, keeping the stored shelf: %s; %s", run.describe(), s.storeSummary())
+			log.Printf("shelf sync failed, keeping the stored shelf: %s; %s", run.Describe(), s.storeSummary())
 			continue
 		}
-		log.Printf("%s; %s", run.describe(), s.storeSummary())
+		log.Printf("%s; %s", run.Describe(), s.storeSummary())
 		onSynced()
 	}
 }

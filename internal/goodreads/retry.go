@@ -1,4 +1,4 @@
-package main
+package goodreads
 
 import (
 	"context"
@@ -13,24 +13,24 @@ import (
 	"time"
 )
 
-// errClass says how a failed request should be handled.
-type errClass int
+// ErrClass says how a failed request should be handled.
+type ErrClass int
 
 const (
-	// errPermanent: retrying will not help (404, other 4xx, unparseable data).
-	errPermanent errClass = iota
-	// errTransient: wait and retry the same request (network, 429, 5xx, WAF).
-	errTransient
-	// errAuth: credentials were rejected (401); only the GraphQL client acts
+	// ErrPermanent: retrying will not help (404, other 4xx, unparseable data).
+	ErrPermanent ErrClass = iota
+	// ErrTransient: wait and retry the same request (network, 429, 5xx, WAF).
+	ErrTransient
+	// ErrAuth: credentials were rejected (401); only the GraphQL client acts
 	// on it, by fetching a fresh API key.
-	errAuth
+	ErrAuth
 )
 
-func (c errClass) String() string {
+func (c ErrClass) String() string {
 	switch c {
-	case errTransient:
+	case ErrTransient:
 		return "transient"
-	case errAuth:
+	case ErrAuth:
 		return "auth"
 	default:
 		return "permanent"
@@ -40,6 +40,10 @@ func (c errClass) String() string {
 // retryBackoff is the wait before each retry of a transient failure when the
 // server gives no Retry-After. Its length is the number of retries.
 var retryBackoff = []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute}
+
+// MaxRetries is how many times a transient failure is retried before the
+// error is returned.
+func MaxRetries() int { return len(retryBackoff) }
 
 // maxRetryAfter caps a server-supplied Retry-After.
 const maxRetryAfter = 15 * time.Minute
@@ -58,32 +62,32 @@ func (e *httpStatusError) Error() string {
 	return fmt.Sprintf("%s %s: unexpected status %s", e.Method, e.URL, e.StatusText)
 }
 
-// classify sorts an error from a request into permanent, transient or auth.
-func classify(err error) errClass {
+// Classify sorts an error from a request into permanent, transient or auth.
+func Classify(err error) ErrClass {
 	var se *httpStatusError
 	if errors.As(err, &se) {
 		switch {
 		case se.Status == http.StatusUnauthorized:
-			return errAuth
+			return ErrAuth
 		case se.Status == http.StatusTooManyRequests, se.Status >= 500:
-			return errTransient
+			return ErrTransient
 		case se.Status == http.StatusForbidden:
 			// A WAF block (AppSync answers WAFForbiddenException) or a
 			// CloudFront block: back off and try again.
-			return errTransient
+			return ErrTransient
 		default:
-			return errPermanent
+			return ErrPermanent
 		}
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) && !isTimeout(err) {
-		return errPermanent
+		return ErrPermanent
 	}
 	var netErr net.Error
 	var urlErr *url.Error
 	if errors.As(err, &netErr) || errors.As(err, &urlErr) {
-		return errTransient
+		return ErrTransient
 	}
-	return errPermanent
+	return ErrPermanent
 }
 
 // isTimeout reports a per-request timeout (as opposed to the caller's context
@@ -142,7 +146,7 @@ func withRetry(ctx context.Context, sleep func(context.Context, time.Duration) e
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if classify(err) != errTransient || i >= len(retryBackoff) {
+		if Classify(err) != ErrTransient || i >= len(retryBackoff) {
 			return err
 		}
 		wait := retryBackoff[i]

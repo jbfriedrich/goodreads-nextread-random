@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"goodreads-nextread/internal/goodreads"
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,8 +21,7 @@ const (
 	defaultRequestDelay  = 1500 * time.Millisecond
 	defaultEnrichDelay   = 2 * time.Second
 	defaultMaxRequests   = 80
-	minMaxRequests       = 3 // profile count + one widget call + final recount
-	maxScrapesPerDay     = 24 * 60
+	MaxScrapesPerDay     = 24 * 60
 )
 
 // Config holds the runtime configuration derived from config.yaml.
@@ -67,8 +68,8 @@ type configFile struct {
 	RefreshInterval string `yaml:"refresh_interval"`
 }
 
-// loadConfig reads and validates config.yaml from path.
-func loadConfig(path string) (*Config, error) {
+// Load reads and validates config.yaml from path.
+func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config file %q: %w", path, err)
@@ -95,7 +96,7 @@ func loadConfig(path string) (*Config, error) {
 		RequestDelay:    defaultRequestDelay,
 		EnrichDelay:     defaultEnrichDelay,
 		MaxRequests:     defaultMaxRequests,
-		GraphQLEndpoint: defaultGraphQLEndpoint,
+		GraphQLEndpoint: goodreads.DefaultGraphQLEndpoint,
 	}
 
 	if cfg.BaseURL, cfg.UserID, cfg.Shelf, err = parseListURL(cf.ListURL); err != nil {
@@ -105,8 +106,8 @@ func loadConfig(path string) (*Config, error) {
 	if cf.ScrapesPerDay != nil {
 		cfg.ScrapesPerDay = *cf.ScrapesPerDay
 	}
-	if cfg.ScrapesPerDay < 1 || cfg.ScrapesPerDay > maxScrapesPerDay {
-		return nil, bad("scrapes_per_day must be between 1 and %d, got %d", maxScrapesPerDay, cfg.ScrapesPerDay)
+	if cfg.ScrapesPerDay < 1 || cfg.ScrapesPerDay > MaxScrapesPerDay {
+		return nil, bad("scrapes_per_day must be between 1 and %d, got %d", MaxScrapesPerDay, cfg.ScrapesPerDay)
 	}
 
 	if p := strings.TrimSpace(cf.DBPath); p != "" {
@@ -126,8 +127,8 @@ func loadConfig(path string) (*Config, error) {
 	if cf.MaxRequests != nil {
 		cfg.MaxRequests = *cf.MaxRequests
 	}
-	if cfg.MaxRequests < minMaxRequests {
-		return nil, bad("max_requests must be at least %d, got %d", minMaxRequests, cfg.MaxRequests)
+	if cfg.MaxRequests < goodreads.MinMaxRequests {
+		return nil, bad("max_requests must be at least %d, got %d", goodreads.MinMaxRequests, cfg.MaxRequests)
 	}
 
 	if ep := strings.TrimSpace(cf.GraphQL); ep != "" {

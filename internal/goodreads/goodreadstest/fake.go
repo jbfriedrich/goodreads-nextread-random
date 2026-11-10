@@ -1,4 +1,8 @@
-package main
+// Package goodreadstest is a fake of the public Goodreads endpoints the app
+// uses (profile, shelf widget, book pages, autocomplete, GraphQL), for tests
+// in every package. It deliberately does not import the goodreads package, so
+// goodreads' own internal tests can use it too.
+package goodreadstest
 
 import (
 	"context"
@@ -17,68 +21,68 @@ import (
 	"time"
 )
 
-// fakeGoodreads emulates the public Goodreads endpoints the app uses: the
+// Fake emulates the public Goodreads endpoints the app uses: the
 // profile page (with the shelf count, behind a redirect like the real site),
 // the custom shelf widget (max 100 entries, honouring sort/order/random), the
 // book page and the autocomplete JSON. Shelf contents can be changed between
 // calls to simulate the reader editing their shelf.
-type fakeGoodreads struct {
-	t   *testing.T
-	srv *httptest.Server
+type Fake struct {
+	t      testing.TB
+	Server *httptest.Server
 
 	mu          sync.Mutex
-	shelf       []fakeEntry // in date-added order (last = newest)
+	shelf       []Entry // in date-added order (last = newest)
 	nextID      int
-	widgetIDs   map[string]int
+	WidgetIDs   map[string]int
 	requests    int
 	widgetCalls int
-	failWidget  bool
-	emptyWidget bool
-	countDelta  int // added to the reported profile count (simulates a mismatch)
-	failAfter   int // if > 0, widget calls after this many fail with HTTP 500
-	throttle    int // the next this-many widget calls answer 429 (Retry-After: 1)
+	FailWidget  bool
+	EmptyWidget bool
+	CountDelta  int // added to the reported profile count (simulates a mismatch)
+	FailAfter   int // if > 0, widget calls after this many fail with HTTP 500
+	Throttle    int // the next this-many widget calls answer 429 (Retry-After: 1)
 	// gate, if set, holds every widget call after the first until it is closed,
 	// so a test can observe the state in the middle of a harvest.
-	gate         chan struct{}
-	books        map[string]bookPageData // served as book pages and via GraphQL
-	autoResults  map[string]string
-	bookPageHits int
+	Gate         chan struct{}
+	Books        map[string]BookData // served as book pages and via GraphQL
+	AutoResults  map[string]string
+	BookPageHits int
 
 	// GraphQL emulation (POST /graphql).
-	apiKey       string // the key GraphQL accepts; book pages embed fakeAPIKey
-	gqlCalls     int
-	gqlBodySizes []int
-	gqlThrottle  int  // the next this-many GraphQL calls answer 429
-	gqlFail      int  // the next this-many GraphQL calls answer 500
-	gqlBroken    bool // answer every query with a validation error (schema change)
+	AcceptedKey  string // the key GraphQL accepts; book pages embed APIKey
+	GQLCalls     int
+	GQLBodySizes []int
+	GQLThrottle  int  // the next this-many GraphQL calls answer 429
+	GQLFail      int  // the next this-many GraphQL calls answer 500
+	GQLBroken    bool // answer every query with a validation error (schema change)
 	// invalid book ids behave like Goodreads' removed books: GraphQL answers
 	// RESOURCE_NOT_FOUND for the alias, the book page is a soft 404 (200,
 	// "Page not found", getBookByLegacyId -> null).
-	invalid map[string]bool
+	Invalid map[string]bool
 }
 
-type fakeEntry struct {
+type Entry struct {
 	ReviewID, BookID, Title, Author string
 	NoCover                         bool
 }
 
-const fakeUID = "12345678"
+const UID = "12345678"
 
-func newFakeGoodreads(t *testing.T, n int) *fakeGoodreads {
+func New(t testing.TB, n int) *Fake {
 	t.Helper()
-	f := &fakeGoodreads{t: t, widgetIDs: map[string]int{}, books: map[string]bookPageData{}, autoResults: map[string]string{}, apiKey: fakeAPIKey, invalid: map[string]bool{}}
+	f := &Fake{t: t, WidgetIDs: map[string]int{}, Books: map[string]BookData{}, AutoResults: map[string]string{}, AcceptedKey: APIKey, Invalid: map[string]bool{}}
 	for i := 0; i < n; i++ {
 		f.add()
 	}
-	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
-	t.Cleanup(f.srv.Close)
+	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(f.Server.Close)
 	return f
 }
 
 // add appends a new (newest) entry to the shelf and returns it.
-func (f *fakeGoodreads) add() fakeEntry {
+func (f *Fake) add() Entry {
 	f.nextID++
-	e := fakeEntry{
+	e := Entry{
 		ReviewID: strconv.Itoa(9000000000 + f.nextID),
 		BookID:   strconv.Itoa(100000 + f.nextID),
 		Title:    fmt.Sprintf("Book %d", f.nextID),
@@ -88,14 +92,14 @@ func (f *fakeGoodreads) add() fakeEntry {
 	return e
 }
 
-func (f *fakeGoodreads) addEntry() fakeEntry {
+func (f *Fake) AddEntry() Entry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.add()
 }
 
 // remove deletes the entry at index i of the date-added order.
-func (f *fakeGoodreads) remove(i int) fakeEntry {
+func (f *Fake) Remove(i int) Entry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	e := f.shelf[i]
@@ -103,34 +107,26 @@ func (f *fakeGoodreads) remove(i int) fakeEntry {
 	return e
 }
 
-func (f *fakeGoodreads) set(fn func(f *fakeGoodreads)) {
+func (f *Fake) Set(fn func(f *Fake)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	fn(f)
 }
 
-func (f *fakeGoodreads) stats() (requests, widgetCalls int) {
+func (f *Fake) Stats() (requests, widgetCalls int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.requests, f.widgetCalls
 }
 
-func (f *fakeGoodreads) listURL() string {
-	return f.srv.URL + "/review/list/" + fakeUID + "?shelf=to-read"
-}
+// NoSleep skips retry waits in tests.
+func NoSleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 
-func (f *fakeGoodreads) client() *grClient {
-	return &grClient{http: f.srv.Client(), base: f.srv.URL, userID: fakeUID, shelf: "to-read", sleep: noSleep}
-}
-
-// noSleep skips retry waits in tests.
-func noSleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
-
-func (f *fakeGoodreads) serve(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/review/custom_widget/"+fakeUID {
+func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/review/custom_widget/"+UID {
 		// Wait outside the lock so other requests are not blocked.
 		f.mu.Lock()
-		gate, calls := f.gate, f.widgetCalls
+		gate, calls := f.Gate, f.widgetCalls
 		f.mu.Unlock()
 		if gate != nil && calls >= 1 {
 			<-gate
@@ -142,34 +138,34 @@ func (f *fakeGoodreads) serve(w http.ResponseWriter, r *http.Request) {
 	f.requests++
 
 	switch {
-	case r.URL.Path == "/user/show/"+fakeUID:
-		http.Redirect(w, r, "/user/show/"+fakeUID+"-reader", http.StatusMovedPermanently)
-	case r.URL.Path == "/user/show/"+fakeUID+"-reader":
+	case r.URL.Path == "/user/show/"+UID:
+		http.Redirect(w, r, "/user/show/"+UID+"-reader", http.StatusMovedPermanently)
+	case r.URL.Path == "/user/show/"+UID+"-reader":
 		fmt.Fprintf(w, `<html><body>
 <a class="actionLinkLite userShowPageShelfListItem" href="/review/list/%[1]s?shelf=read">read&lrm; (5)</a>
 <a class="actionLinkLite userShowPageShelfListItem" href="/review/list/%[1]s?shelf=to-read">
   to-read&lrm;
   (%[2]d)
-</a></body></html>`, fakeUID, len(f.shelf)+f.countDelta)
-	case r.URL.Path == "/review/custom_widget/"+fakeUID:
+</a></body></html>`, UID, len(f.shelf)+f.CountDelta)
+	case r.URL.Path == "/review/custom_widget/"+UID:
 		f.serveWidget(w, r)
 	case strings.HasPrefix(r.URL.Path, "/book/show/"):
-		f.bookPageHits++
+		f.BookPageHits++
 		id := strings.TrimPrefix(r.URL.Path, "/book/show/")
-		if f.invalid[id] {
-			fmt.Fprint(w, softNotFoundPage(id))
+		if f.Invalid[id] {
+			fmt.Fprint(w, SoftNotFoundPage(id))
 			return
 		}
-		d, ok := f.books[id]
+		d, ok := f.Books[id]
 		if !ok {
 			http.NotFound(w, r)
 			return
 		}
-		fmt.Fprint(w, bookPageHTML(id, d, fakeAPIKey))
+		fmt.Fprint(w, BookPageHTML(id, d, APIKey))
 	case r.URL.Path == "/graphql":
 		f.serveGraphQL(w, r)
 	case r.URL.Path == "/book/auto_complete":
-		res, ok := f.autoResults[r.URL.Query().Get("q")]
+		res, ok := f.AutoResults[r.URL.Query().Get("q")]
 		if !ok {
 			res = "[]"
 		}
@@ -180,25 +176,25 @@ func (f *fakeGoodreads) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (f *fakeGoodreads) serveWidget(w http.ResponseWriter, r *http.Request) {
+func (f *Fake) serveWidget(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f.widgetCalls++
-	f.widgetIDs[q.Get("widget_id")]++
+	f.WidgetIDs[q.Get("widget_id")]++
 	if q.Get("shelf") != "to-read" {
 		f.t.Errorf("widget requested for shelf %q", q.Get("shelf"))
 	}
-	if f.throttle > 0 && f.widgetCalls > 1 {
-		f.throttle--
+	if f.Throttle > 0 && f.widgetCalls > 1 {
+		f.Throttle--
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "slow down", http.StatusTooManyRequests)
 		return
 	}
-	if f.failWidget || (f.failAfter > 0 && f.widgetCalls > f.failAfter) {
+	if f.FailWidget || (f.FailAfter > 0 && f.widgetCalls > f.FailAfter) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 		return
 	}
 
-	entries := append([]fakeEntry(nil), f.shelf...)
+	entries := append([]Entry(nil), f.shelf...)
 	switch key := q.Get("sort"); key {
 	case "date_added":
 		// already in date-added order
@@ -210,7 +206,7 @@ func (f *fakeGoodreads) serveWidget(w http.ResponseWriter, r *http.Request) {
 		h.Write([]byte(key))
 		rng := rand.New(rand.NewSource(int64(h.Sum64())))
 		perm := rng.Perm(len(entries))
-		shuffled := make([]fakeEntry, len(entries))
+		shuffled := make([]Entry, len(entries))
 		for i, p := range perm {
 			shuffled[i] = entries[p]
 		}
@@ -229,19 +225,19 @@ func (f *fakeGoodreads) serveWidget(w http.ResponseWriter, r *http.Request) {
 	if len(entries) > limit {
 		entries = entries[:limit]
 	}
-	if f.emptyWidget {
+	if f.EmptyWidget {
 		entries = nil
 	}
 
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	fmt.Fprint(w, widgetJS(q.Get("widget_id"), entries))
+	fmt.Fprint(w, WidgetJS(q.Get("widget_id"), entries))
 }
 
-// softNotFoundPage is what Goodreads serves for a removed book: HTTP 200,
+// SoftNotFoundPage is what Goodreads serves for a removed book: HTTP 200,
 // "Page not found", and Apollo state whose lookup for the id is null.
-func softNotFoundPage(id string) string {
+func SoftNotFoundPage(id string) string {
 	data, _ := json.Marshal(map[string]any{"props": map[string]any{"pageProps": map[string]any{
-		"apiKey": fakeAPIKey,
+		"apiKey": APIKey,
 		"apolloState": map[string]any{"ROOT_QUERY": map[string]any{
 			"__typename": "Query",
 			`getBookByLegacyId({"legacyId":"` + id + `"})`: nil,
@@ -250,37 +246,37 @@ func softNotFoundPage(id string) string {
 	return `<html><head><title>Page not found</title></head><body><script id="__NEXT_DATA__" type="application/json">` + string(data) + `</script></body></html>`
 }
 
-// fakeAPIKey is the AppSync key the fake's book pages embed.
-const fakeAPIKey = "da2-fakekey"
+// APIKey is the AppSync key the fake's book pages embed.
+const APIKey = "da2-fakekey"
 
 var gqlAliasRe = regexp.MustCompile(`(b\d+):getBookByLegacyId\(legacyId:(\d+)\)`)
 
 // serveGraphQL emulates AppSync's getBookByLegacyId with aliases: unknown ids
 // come back null, a wrong x-api-key is a 401 UnauthorizedException.
-func (f *fakeGoodreads) serveGraphQL(w http.ResponseWriter, r *http.Request) {
-	f.gqlCalls++
+func (f *Fake) serveGraphQL(w http.ResponseWriter, r *http.Request) {
+	f.GQLCalls++
 	body, _ := io.ReadAll(r.Body)
-	f.gqlBodySizes = append(f.gqlBodySizes, len(body))
+	f.GQLBodySizes = append(f.GQLBodySizes, len(body))
 	w.Header().Set("Content-Type", "application/json")
 
-	if r.Header.Get("x-api-key") != f.apiKey {
+	if r.Header.Get("x-api-key") != f.AcceptedKey {
 		w.WriteHeader(http.StatusUnauthorized)
 		fmt.Fprint(w, `{"errors":[{"errorType":"UnauthorizedException","message":"You are not authorized to make this call."}]}`)
 		return
 	}
-	if f.gqlThrottle > 0 {
-		f.gqlThrottle--
+	if f.GQLThrottle > 0 {
+		f.GQLThrottle--
 		w.Header().Set("Retry-After", "2")
 		w.WriteHeader(http.StatusTooManyRequests)
 		fmt.Fprint(w, `{"errors":[{"errorType":"TooManyRequestsException"}]}`)
 		return
 	}
-	if f.gqlFail > 0 {
-		f.gqlFail--
+	if f.GQLFail > 0 {
+		f.GQLFail--
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if f.gqlBroken {
+	if f.GQLBroken {
 		fmt.Fprint(w, `{"data":null,"errors":[{"errorType":"ValidationError","message":"Validation error of type FieldUndefined: Field 'legacyId' in type 'Book' is undefined"}]}`)
 		return
 	}
@@ -296,8 +292,8 @@ func (f *fakeGoodreads) serveGraphQL(w http.ResponseWriter, r *http.Request) {
 	var errs []map[string]any
 	matches := gqlAliasRe.FindAllStringSubmatch(req.Query, -1)
 	for _, m := range matches {
-		switch d, ok := f.books[m[2]]; {
-		case f.invalid[m[2]]:
+		switch d, ok := f.Books[m[2]]; {
+		case f.Invalid[m[2]]:
 			data[m[1]] = nil
 			errs = append(errs, map[string]any{"path": []any{m[1]}, "errorType": "RESOURCE_NOT_FOUND", "message": "Book is invalid"})
 		case ok:
@@ -318,7 +314,7 @@ func (f *fakeGoodreads) serveGraphQL(w http.ResponseWriter, r *http.Request) {
 
 // gqlBookJSON renders d the way AppSync returns a Book (publicationTime as a
 // float, like the real API).
-func gqlBookJSON(id string, d bookPageData) map[string]any {
+func gqlBookJSON(id string, d BookData) map[string]any {
 	legacy, _ := strconv.Atoi(id)
 	b := map[string]any{
 		"legacyId":    legacy,
@@ -338,9 +334,9 @@ func gqlBookJSON(id string, d bookPageData) map[string]any {
 	return b
 }
 
-// widgetJS renders entries the way Goodreads does: HTML inside a
+// WidgetJS renders entries the way Goodreads does: HTML inside a
 // single-quoted JS string with \" \/ \n \' escapes.
-func widgetJS(widgetID string, entries []fakeEntry) string {
+func WidgetJS(widgetID string, entries []Entry) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, `<div class="gr_custom_container_%s">`, widgetID)
 	for _, e := range entries {
@@ -366,4 +362,51 @@ func widgetJS(widgetID string, entries []fakeEntry) string {
 
 	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `/`, `\/`, "\n", `\n`, `'`, `\'`).Replace(sb.String())
 	return "  var widget_code = '" + escaped + "'\n  document.write(widget_code)\n"
+}
+
+// BookData is what the fake serves for one book, both as a book page and
+// through GraphQL.
+type BookData struct {
+	Desc, Image, ISBN13, ISBN10 string
+	Pages                       int
+	Rating                      float64
+	EditionTime, WorkTime       int64
+}
+
+// BookPageHTML renders a minimal book page with the Apollo state shape the
+// real /book/show page embeds in __NEXT_DATA__, plus the page's AppSync key
+// (omitted when apiKey is "").
+func BookPageHTML(bookID string, d BookData, apiKey string) string {
+	book := map[string]any{
+		"__typename":  "Book",
+		"legacyId":    bookID,
+		"description": d.Desc,
+		"imageUrl":    d.Image,
+		"details": map[string]any{
+			"numPages": d.Pages, "publicationTime": d.EditionTime, "isbn13": d.ISBN13, "isbn": d.ISBN10,
+		},
+	}
+	state := map[string]any{
+		"ROOT_QUERY": map[string]any{
+			`getBookByLegacyId({"legacyId":"` + bookID + `"})`: map[string]any{"__ref": "Book:b" + bookID},
+		},
+		"Book:b" + bookID: book,
+	}
+	if d.WorkTime != 0 || d.Rating != 0 {
+		book["work"] = map[string]any{"__ref": "Work:w" + bookID}
+		state["Work:w"+bookID] = map[string]any{
+			"__typename": "Work",
+			"details":    map[string]any{"publicationTime": d.WorkTime},
+			"stats":      map[string]any{"averageRating": d.Rating},
+		}
+	}
+	pageProps := map[string]any{"apolloState": state}
+	if apiKey != "" {
+		pageProps["apiKey"] = apiKey
+	}
+	data, err := json.Marshal(map[string]any{"props": map[string]any{"pageProps": pageProps}})
+	if err != nil {
+		panic(err)
+	}
+	return `<html><body><script id="__NEXT_DATA__" type="application/json">` + string(data) + `</script></body></html>`
 }

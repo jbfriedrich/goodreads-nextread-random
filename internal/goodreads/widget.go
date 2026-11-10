@@ -1,4 +1,4 @@
-package main
+package goodreads
 
 import (
 	"bytes"
@@ -177,6 +177,10 @@ func parseShelfCount(page []byte, shelf string) (int, error) {
 	return count, nil
 }
 
+// MinMaxRequests is the smallest request budget a harvest can work with:
+// profile count, one widget call and the final recount.
+const MinMaxRequests = 3
+
 // fixedOrders are the deterministic widget orderings a harvest walks before
 // falling back to random samples. Each returns the first 100 books of the
 // shelf in that order; together they covered 590 of a 636-book shelf in a
@@ -193,8 +197,8 @@ var fixedOrders = [][2]string{
 	{"isbn", "a"}, {"isbn", "d"},
 }
 
-// harvestResult is the outcome of collecting a whole shelf.
-type harvestResult struct {
+// HarvestResult is the outcome of collecting a whole shelf.
+type HarvestResult struct {
 	Books    []Book // distinct entries, by review id
 	Expected int    // shelf size from the profile, read again at the end
 	Complete bool   // len(Books) == Expected
@@ -209,15 +213,15 @@ type harvestResult struct {
 // If onBatch is set, it is called after each widget call with the entries that
 // call newly found (the first batch is the newest 100); an error from it
 // aborts the harvest.
-func (c *grClient) harvest(ctx context.Context, maxRequests int, onBatch func([]Book) error) (res harvestResult, err error) {
-	if maxRequests < minMaxRequests {
-		maxRequests = minMaxRequests
+func (c *Client) Harvest(ctx context.Context, maxRequests int, onBatch func([]Book) error) (res HarvestResult, err error) {
+	if maxRequests < MinMaxRequests {
+		maxRequests = MinMaxRequests
 	}
-	start := c.requestCount()
-	used := func() int { return c.requestCount() - start }
+	start := c.RequestCount()
+	used := func() int { return c.RequestCount() - start }
 	defer func() { res.Requests = used() }()
 
-	expected, err := c.shelfCount(ctx)
+	expected, err := c.ShelfCount(ctx)
 	if err != nil {
 		return res, err
 	}
@@ -255,17 +259,17 @@ func (c *grClient) harvest(ctx context.Context, maxRequests int, onBatch func([]
 		}
 	}
 
-	if res.Expected, err = c.shelfCount(ctx); err != nil {
+	if res.Expected, err = c.ShelfCount(ctx); err != nil {
 		return res, err
 	}
 	res.Complete = len(res.Books) == res.Expected
 	return res, nil
 }
 
-// quickCheck returns the profile's shelf count and the 100 most recently added
+// QuickCheck returns the profile's shelf count and the 100 most recently added
 // entries — enough to tell whether the shelf changed since the last harvest.
-func (c *grClient) quickCheck(ctx context.Context) (expected int, newest []Book, err error) {
-	if expected, err = c.shelfCount(ctx); err != nil {
+func (c *Client) QuickCheck(ctx context.Context) (expected int, newest []Book, err error) {
+	if expected, err = c.ShelfCount(ctx); err != nil {
 		return 0, nil, err
 	}
 	if newest, err = c.widget(ctx, "date_added", "d"); err != nil {

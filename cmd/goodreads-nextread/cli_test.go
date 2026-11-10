@@ -3,10 +3,12 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"goodreads-nextread/internal/goodreads"
 )
 
 func TestFormatBookIncludesCoreFields(t *testing.T) {
-	b := Book{
+	b := goodreads.Book{
 		Title:         "The Magical Cheese Emporium (Spellshop, #4)",
 		Author:        "Sarah Beth Durst",
 		AverageRating: "3.98",
@@ -33,7 +35,7 @@ func TestFormatBookIncludesCoreFields(t *testing.T) {
 }
 
 func TestFormatBookOmitsAbsentFields(t *testing.T) {
-	b := Book{Title: "Untitled", Author: "Someone", BookID: "1"}
+	b := goodreads.Book{Title: "Untitled", Author: "Someone", BookID: "1"}
 	out := formatBook(b)
 
 	if strings.Contains(out, "Pages:") {
@@ -52,7 +54,7 @@ func TestFormatBookOmitsAbsentFields(t *testing.T) {
 }
 
 func TestFormatBookTreatsZeroRatingAsAbsent(t *testing.T) {
-	b := Book{Title: "Unrated", Author: "Nobody", BookID: "1", AverageRating: "0.0"}
+	b := goodreads.Book{Title: "Unrated", Author: "Nobody", BookID: "1", AverageRating: "0.0"}
 	if out := formatBook(b); strings.Contains(out, "Rating:") {
 		t.Errorf("expected no Rating line for a 0.0 (unrated) book\n%s", out)
 	}

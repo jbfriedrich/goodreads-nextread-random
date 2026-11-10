@@ -55,6 +55,11 @@ key every page ships in `__NEXT_DATA__.props.pageProps.apiKey`, sent as
 
 ## Design
 
+Code (since the 2026-11-10 restructure): `internal/goodreads` (client, widget,
+harvest, book pages, GraphQL), `internal/store`, `internal/shelfsync`,
+`internal/enrich`, `internal/web`, `internal/config`, and the entry point in
+`cmd/goodreads-nextread`.
+
 - **Quick check (2 requests).** Profile count, plus the widget sorted
   `date_added desc`. Additions always appear among the newest, re-adds included.
   - Count == stored and every newest entry known: nothing changed.

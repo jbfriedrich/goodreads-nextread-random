@@ -1,4 +1,4 @@
-package main
+package goodreads
 
 import (
 	"context"
@@ -7,55 +7,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
-
-func TestBookURLUsesBookID(t *testing.T) {
-	b := Book{BookID: "250727343"}
-	want := "https://www.goodreads.com/book/show/250727343"
-	if got := b.BookURL(); got != want {
-		t.Errorf("BookURL() = %q, want %q", got, want)
-	}
-}
-
-func TestBookURLFallsBackToSearchWithoutBookID(t *testing.T) {
-	b := Book{Title: "Salt & Static", Author: "Bo Lantern"}
-	want := "https://www.goodreads.com/search?q=Salt+%26+Static+Bo+Lantern"
-	if got := b.BookURL(); got != want {
-		t.Errorf("BookURL() = %q, want %q", got, want)
-	}
-}
-
-func TestCleanDescriptionStripsHTMLAndTruncates(t *testing.T) {
-	got := cleanDescription("<b>Great book.</b><br/>A tale of <i>cheese</i> &amp; revolution.", 100)
-	want := "Great book. A tale of cheese & revolution."
-	if got != want {
-		t.Errorf("cleanDescription = %q, want %q", got, want)
-	}
-
-	long := strings.Repeat("word ", 100)
-	truncated := cleanDescription(long, 20)
-	if len(truncated) > 23 { // 20 + up to "..."
-		t.Errorf("truncated too long: %d chars: %q", len(truncated), truncated)
-	}
-	if !strings.HasSuffix(truncated, "...") {
-		t.Errorf("expected ellipsis suffix, got %q", truncated)
-	}
-}
-
-func TestCleanDescriptionTruncatesOnRuneBoundary(t *testing.T) {
-	// "é" is two bytes; a byte-based cut at 3 would split it.
-	got := cleanDescription("ééééé", 3)
-	if !utf8.ValidString(got) {
-		t.Fatalf("truncated description is not valid UTF-8: %q", got)
-	}
-	if got != "ééé..." {
-		t.Errorf("cleanDescription = %q, want %q", got, "ééé...")
-	}
-}
 
 // flakyServer answers with the given responses in order, then 200 "ok".
 type flakyResponse struct {
@@ -64,7 +18,7 @@ type flakyResponse struct {
 	retryAfter string
 }
 
-func newFlakyClient(t *testing.T, responses ...flakyResponse) (*grClient, *[]time.Duration, *int) {
+func newFlakyClient(t *testing.T, responses ...flakyResponse) (*Client, *[]time.Duration, *int) {
 	t.Helper()
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +38,7 @@ func newFlakyClient(t *testing.T, responses ...flakyResponse) (*grClient, *[]tim
 	t.Cleanup(srv.Close)
 
 	var waits []time.Duration
-	c := &grClient{http: srv.Client(), base: srv.URL, sleep: func(ctx context.Context, d time.Duration) error {
+	c := &Client{http: srv.Client(), base: srv.URL, sleep: func(ctx context.Context, d time.Duration) error {
 		waits = append(waits, d)
 		return ctx.Err()
 	}}
@@ -133,8 +87,8 @@ func TestGetDoesNotRetryNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for 404")
 	}
-	if classify(err) != errPermanent {
-		t.Errorf("404 classified as %v, want permanent", classify(err))
+	if Classify(err) != ErrPermanent {
+		t.Errorf("404 classified as %v, want permanent", Classify(err))
 	}
 	if *calls != 1 || len(*waits) != 0 {
 		t.Errorf("calls = %d, waits = %v; a 404 must not be retried", *calls, *waits)
@@ -148,7 +102,7 @@ func TestGetGivesUpAfterFiveRetries(t *testing.T) {
 	}
 	c, waits, calls := newFlakyClient(t, many...)
 	_, _, err := c.get(context.Background(), "/x", nil)
-	if err == nil || classify(err) != errTransient {
+	if err == nil || Classify(err) != ErrTransient {
 		t.Fatalf("err = %v, want the transient error after giving up", err)
 	}
 	if *calls != 6 || len(*waits) != 5 {
@@ -175,22 +129,22 @@ func TestGetStopsRetryingWhenContextCancelled(t *testing.T) {
 func TestClassify(t *testing.T) {
 	tests := []struct {
 		err  error
-		want errClass
+		want ErrClass
 	}{
-		{&httpStatusError{Status: 404}, errPermanent},
-		{&httpStatusError{Status: 410}, errPermanent},
-		{&httpStatusError{Status: 400}, errPermanent},
-		{&httpStatusError{Status: 401}, errAuth},
-		{&httpStatusError{Status: 403}, errTransient},
-		{&httpStatusError{Status: 429}, errTransient},
-		{&httpStatusError{Status: 500}, errTransient},
-		{fmt.Errorf("wrapped: %w", &httpStatusError{Status: 503}), errTransient},
-		{&net.OpError{Op: "dial", Err: errors.New("connection refused")}, errTransient},
-		{errors.New("parse error"), errPermanent},
+		{&httpStatusError{Status: 404}, ErrPermanent},
+		{&httpStatusError{Status: 410}, ErrPermanent},
+		{&httpStatusError{Status: 400}, ErrPermanent},
+		{&httpStatusError{Status: 401}, ErrAuth},
+		{&httpStatusError{Status: 403}, ErrTransient},
+		{&httpStatusError{Status: 429}, ErrTransient},
+		{&httpStatusError{Status: 500}, ErrTransient},
+		{fmt.Errorf("wrapped: %w", &httpStatusError{Status: 503}), ErrTransient},
+		{&net.OpError{Op: "dial", Err: errors.New("connection refused")}, ErrTransient},
+		{errors.New("parse error"), ErrPermanent},
 	}
 	for _, tt := range tests {
-		if got := classify(tt.err); got != tt.want {
-			t.Errorf("classify(%v) = %v, want %v", tt.err, got, tt.want)
+		if got := Classify(tt.err); got != tt.want {
+			t.Errorf("Classify(%v) = %v, want %v", tt.err, got, tt.want)
 		}
 	}
 }

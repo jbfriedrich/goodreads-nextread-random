@@ -7,8 +7,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY *.go ./
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /goodreads-nextread .
+COPY cmd/ cmd/
+COPY internal/ internal/
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /goodreads-nextread ./cmd/goodreads-nextread
 
 # ---- runtime: nginx + the Go backend ----
 FROM nginx:alpine

@@ -1,4 +1,4 @@
-package main
+package goodreads
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Goodreads' book pages load their data from an AppSync GraphQL API using an
@@ -19,19 +20,19 @@ import (
 // fall back to the book pages.
 
 const (
-	defaultGraphQLEndpoint = "https://kxbwmqov6jgg3daaamb744ycu4.appsync-api.us-east-1.amazonaws.com/graphql"
-	// gqlBatchSize books are looked up per request.
-	gqlBatchSize = 25
-	// gqlMaxBody caps the request body. AppSync's WAF rejected an 11.7 KB
+	DefaultGraphQLEndpoint = "https://kxbwmqov6jgg3daaamb744ycu4.appsync-api.us-east-1.amazonaws.com/graphql"
+	// BatchSize books are looked up per request.
+	BatchSize = 25
+	// MaxQueryBody caps the request body. AppSync's WAF rejected an 11.7 KB
 	// query body (consistent with AWS WAF's 8 KB body rule); 6 KB leaves room.
-	gqlMaxBody = 6 << 10
-	// settingGraphQLKey caches the API key in the store's settings table.
-	settingGraphQLKey = "graphql_api_key"
+	MaxQueryBody = 6 << 10
+	// SettingGraphQLKey caches the API key in the store's settings table.
+	SettingGraphQLKey = "graphql_api_key"
 )
 
-// errGraphQLUnavailable marks a GraphQL failure that waiting will not fix
+// ErrGraphQLUnavailable marks a GraphQL failure that waiting will not fix
 // (schema change, key still rejected after a refresh, unexpected response).
-var errGraphQLUnavailable = errors.New("graphql unavailable")
+var ErrGraphQLUnavailable = errors.New("graphql unavailable")
 
 // gqlBookFragment lists the fields we read; a fragment keeps each aliased
 // lookup in the query to ~45 bytes.
@@ -98,26 +99,42 @@ type gqlResponse struct {
 	Errors []gqlError          `json:"errors"`
 }
 
-// gqlClient queries the GraphQL API. It shares the enrichment grClient for
+// GraphQL queries the GraphQL API. It shares the enrichment Client for
 // pacing, retry waits and fetching a book page when the key must be (re)read.
-type gqlClient struct {
+type GraphQL struct {
 	http     *http.Client
 	endpoint string
-	gr       *grClient
-	store    *store
+	gr       *Client
+	keys     KeyStore
 	key      string
+}
+
+// KeyStore persists the API key between runs (the store's settings table).
+type KeyStore interface {
+	Setting(key string) (string, error)
+	SetSetting(key, value string) error
+}
+
+// NewGraphQL builds a GraphQL client. gr is the enrichment Client: GraphQL
+// requests share its pacing and retry waits, and it fetches the book page the
+// API key is read from. httpClient nil means one with a 30 s timeout.
+func NewGraphQL(httpClient *http.Client, endpoint string, gr *Client, keys KeyStore) *GraphQL {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	return &GraphQL{http: httpClient, endpoint: endpoint, gr: gr, keys: keys}
 }
 
 // lookup fetches details for ids. In the result, an id mapped to nil does not
 // exist (permanent); an id missing from the result failed on its own and
 // should be tried through its book page. A transient error is returned as is
-// (retries are already used up); anything else wraps errGraphQLUnavailable.
-func (g *gqlClient) lookup(ctx context.Context, ids []string) (map[string]*Book, error) {
+// (retries are already used up); anything else wraps ErrGraphQLUnavailable.
+func (g *GraphQL) Lookup(ctx context.Context, ids []string) (map[string]*Book, error) {
 	body, err := bookQueryBody(ids)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errGraphQLUnavailable, err)
+		return nil, fmt.Errorf("%w: %v", ErrGraphQLUnavailable, err)
 	}
-	if len(body) > gqlMaxBody && len(ids) > 1 {
+	if len(body) > MaxQueryBody && len(ids) > 1 {
 		return g.lookupSplit(ctx, ids)
 	}
 
@@ -126,7 +143,7 @@ func (g *gqlClient) lookup(ctx context.Context, ids []string) (map[string]*Book,
 		return nil, g.unavailable("reading API key", err)
 	}
 	raw, err := g.post(ctx, key, body)
-	if classify(err) == errAuth {
+	if Classify(err) == ErrAuth {
 		// The key rotated: read the current one from a book page, once.
 		if key, err = g.apiKey(ctx, ids[0], true); err != nil {
 			return nil, g.unavailable("refreshing API key", err)
@@ -139,7 +156,7 @@ func (g *gqlClient) lookup(ctx context.Context, ids []string) (map[string]*Book,
 
 	var resp gqlResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, fmt.Errorf("%w: unexpected response: %v", errGraphQLUnavailable, err)
+		return nil, fmt.Errorf("%w: unexpected response: %v", ErrGraphQLUnavailable, err)
 	}
 
 	// Errors scoped to one alias are answers about that book; an error
@@ -151,12 +168,12 @@ func (g *gqlClient) lookup(ctx context.Context, ids []string) (map[string]*Book,
 			alias, _ = e.Path[0].(string)
 		}
 		if alias == "" {
-			return nil, fmt.Errorf("%w: %s: %s", errGraphQLUnavailable, e.ErrorType, e.Message)
+			return nil, fmt.Errorf("%w: %s: %s", ErrGraphQLUnavailable, e.ErrorType, e.Message)
 		}
 		aliasErr[alias] = e.ErrorType
 	}
 	if resp.Data == nil && len(aliasErr) == 0 {
-		return nil, fmt.Errorf("%w: response has no data", errGraphQLUnavailable)
+		return nil, fmt.Errorf("%w: response has no data", ErrGraphQLUnavailable)
 	}
 
 	out := make(map[string]*Book, len(ids))
@@ -179,13 +196,13 @@ func (g *gqlClient) lookup(ctx context.Context, ids []string) (map[string]*Book,
 }
 
 // lookupSplit halves a batch whose query body is too large.
-func (g *gqlClient) lookupSplit(ctx context.Context, ids []string) (map[string]*Book, error) {
+func (g *GraphQL) lookupSplit(ctx context.Context, ids []string) (map[string]*Book, error) {
 	mid := len(ids) / 2
-	left, err := g.lookup(ctx, ids[:mid])
+	left, err := g.Lookup(ctx, ids[:mid])
 	if err != nil {
 		return nil, err
 	}
-	right, err := g.lookup(ctx, ids[mid:])
+	right, err := g.Lookup(ctx, ids[mid:])
 	if err != nil {
 		return nil, err
 	}
@@ -196,22 +213,22 @@ func (g *gqlClient) lookupSplit(ctx context.Context, ids []string) (map[string]*
 }
 
 // unavailable passes transient errors through (the caller waits and retries)
-// and wraps everything else as errGraphQLUnavailable (the caller falls back).
-func (g *gqlClient) unavailable(what string, err error) error {
-	if classify(err) == errTransient || errors.Is(err, context.Canceled) {
+// and wraps everything else as ErrGraphQLUnavailable (the caller falls back).
+func (g *GraphQL) unavailable(what string, err error) error {
+	if Classify(err) == ErrTransient || errors.Is(err, context.Canceled) {
 		return err
 	}
-	return fmt.Errorf("%w: %s: %v", errGraphQLUnavailable, what, err)
+	return fmt.Errorf("%w: %s: %v", ErrGraphQLUnavailable, what, err)
 }
 
 // apiKey returns the cached key, or — when there is none or refresh is set —
 // reads it from the book page of hintBookID and caches it in the store.
-func (g *gqlClient) apiKey(ctx context.Context, hintBookID string, refresh bool) (string, error) {
+func (g *GraphQL) apiKey(ctx context.Context, hintBookID string, refresh bool) (string, error) {
 	if !refresh {
 		if g.key != "" {
 			return g.key, nil
 		}
-		if v, err := g.store.Setting(settingGraphQLKey); err == nil && v != "" {
+		if v, err := g.keys.Setting(SettingGraphQLKey); err == nil && v != "" {
 			g.key = v
 			return v, nil
 		}
@@ -224,7 +241,7 @@ func (g *gqlClient) apiKey(ctx context.Context, hintBookID string, refresh bool)
 	if err != nil {
 		return "", err
 	}
-	if err := g.store.SetSetting(settingGraphQLKey, key); err != nil {
+	if err := g.keys.SetSetting(SettingGraphQLKey, key); err != nil {
 		return "", err
 	}
 	g.key = key
@@ -233,7 +250,7 @@ func (g *gqlClient) apiKey(ctx context.Context, hintBookID string, refresh bool)
 
 // post sends one GraphQL request, paced and counted like other enrichment
 // requests, retrying transient failures in place.
-func (g *gqlClient) post(ctx context.Context, key string, body []byte) ([]byte, error) {
+func (g *GraphQL) post(ctx context.Context, key string, body []byte) ([]byte, error) {
 	var out []byte
 	err := withRetry(ctx, g.gr.sleep, "POST graphql", func() error {
 		if err := g.gr.pace(ctx); err != nil {

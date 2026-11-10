@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"database/sql"
@@ -8,18 +8,20 @@ import (
 	"path/filepath"
 	"time"
 
+	"goodreads-nextread/internal/goodreads"
+
 	_ "modernc.org/sqlite" // pure-Go driver: keeps CGO_ENABLED=0 builds working
 )
 
-// store is the SQLite-backed copy of the shelf plus a log of sync runs. It is
-// the source of truth between scrapes: the in-memory shelfCache is loaded from
+// Store is the SQLite-backed copy of the shelf plus a log of sync runs. It is
+// the source of truth between scrapes: the web server's in-memory cache is loaded from
 // it, and a failed scrape never changes it.
-type store struct {
+type Store struct {
 	db *sql.DB
 }
 
-// syncRun is one entry of the sync log.
-type syncRun struct {
+// SyncRun is one entry of the sync log.
+type SyncRun struct {
 	StartedAt  time.Time
 	FinishedAt time.Time
 	Kind       string // "quick" or "full"
@@ -70,9 +72,9 @@ CREATE TABLE IF NOT EXISTS sync_runs (
 
 const bookColumns = `review_id, book_id, title, author, average_rating, num_pages, published, isbn, image_url, description`
 
-// openStore opens (creating if needed) the database at path and applies the
+// Open opens (creating if needed) the database at path and applies the
 // schema. The parent directory is created if missing.
-func openStore(path string) (*store, error) {
+func Open(path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("creating database directory: %w", err)
@@ -91,10 +93,10 @@ func openStore(path string) (*store, error) {
 		db.Close()
 		return nil, fmt.Errorf("initialising database %q: %w", path, err)
 	}
-	return &store{db: db}, nil
+	return &Store{db: db}, nil
 }
 
-func (s *store) Close() error { return s.db.Close() }
+func (s *Store) Close() error { return s.db.Close() }
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
@@ -105,7 +107,7 @@ func ts(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 // not enriched yet: after enrichment, the verified id wins. Only when complete is true — the scrape collected
 // exactly the number of books the profile reports — are books missing from the
 // result deleted. A partial scrape therefore never shrinks the shelf.
-func (s *store) Reconcile(books []Book, complete bool, now time.Time) (added, removed int, err error) {
+func (s *Store) Reconcile(books []goodreads.Book, complete bool, now time.Time) (added, removed int, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, 0, err
@@ -158,11 +160,11 @@ func (s *store) Reconcile(books []Book, complete bool, now time.Time) (added, re
 	return added, removed, nil
 }
 
-func scanBooks(rows *sql.Rows) ([]Book, error) {
+func scanBooks(rows *sql.Rows) ([]goodreads.Book, error) {
 	defer rows.Close()
-	var books []Book
+	var books []goodreads.Book
 	for rows.Next() {
-		var b Book
+		var b goodreads.Book
 		if err := rows.Scan(&b.ReviewID, &b.BookID, &b.Title, &b.Author, &b.AverageRating,
 			&b.NumPages, &b.Published, &b.ISBN, &b.ImageURL, &b.Description); err != nil {
 			return nil, err
@@ -173,7 +175,7 @@ func scanBooks(rows *sql.Rows) ([]Book, error) {
 }
 
 // AllBooks returns every book on the stored shelf.
-func (s *store) AllBooks() ([]Book, error) {
+func (s *Store) AllBooks() ([]goodreads.Book, error) {
 	rows, err := s.db.Query(`SELECT ` + bookColumns + ` FROM books ORDER BY first_seen_at, review_id`)
 	if err != nil {
 		return nil, err
@@ -182,14 +184,14 @@ func (s *store) AllBooks() ([]Book, error) {
 }
 
 // Count returns the number of books on the stored shelf.
-func (s *store) Count() (int, error) {
+func (s *Store) Count() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM books`).Scan(&n)
 	return n, err
 }
 
 // HasAll reports whether every review id is already stored.
-func (s *store) HasAll(reviewIDs []string) (bool, error) {
+func (s *Store) HasAll(reviewIDs []string) (bool, error) {
 	stmt, err := s.db.Prepare(`SELECT EXISTS (SELECT 1 FROM books WHERE review_id = ?)`)
 	if err != nil {
 		return false, err
@@ -209,7 +211,7 @@ func (s *store) HasAll(reviewIDs []string) (bool, error) {
 
 // PendingEnrichment returns up to limit books that have not been enriched
 // yet, oldest first.
-func (s *store) PendingEnrichment(limit int) ([]Book, error) {
+func (s *Store) PendingEnrichment(limit int) ([]goodreads.Book, error) {
 	rows, err := s.db.Query(`SELECT `+bookColumns+` FROM books
 		WHERE enriched_at IS NULL ORDER BY first_seen_at, review_id LIMIT ?`, limit)
 	if err != nil {
@@ -219,7 +221,7 @@ func (s *store) PendingEnrichment(limit int) ([]Book, error) {
 }
 
 // PendingEnrichmentCount returns how many books still lack enrichment.
-func (s *store) PendingEnrichmentCount() (int, error) {
+func (s *Store) PendingEnrichmentCount() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM books WHERE enriched_at IS NULL`).Scan(&n)
 	return n, err
@@ -229,7 +231,7 @@ func (s *store) PendingEnrichmentCount() (int, error) {
 // enriched. Empty fields in e leave the stored value unchanged, so saving an
 // empty Book marks a permanent failure (e.g. the book no longer exists) as
 // done without touching what is stored.
-func (s *store) SaveEnrichment(reviewID string, e Book, now time.Time) error {
+func (s *Store) SaveEnrichment(reviewID string, e goodreads.Book, now time.Time) error {
 	_, err := s.db.Exec(`UPDATE books SET
 			book_id        = CASE WHEN ?1 <> '' THEN ?1 ELSE book_id        END,
 			average_rating = CASE WHEN ?2 <> '' THEN ?2 ELSE average_rating END,
@@ -248,13 +250,13 @@ func (s *store) SaveEnrichment(reviewID string, e Book, now time.Time) error {
 // MarkMissing records that Goodreads has no book for this entry: it clears the
 // (dead) book id, so the page links to a Goodreads search instead, and marks
 // enrichment done so it is not retried.
-func (s *store) MarkMissing(reviewID string, now time.Time) error {
+func (s *Store) MarkMissing(reviewID string, now time.Time) error {
 	_, err := s.db.Exec(`UPDATE books SET book_id = '', enriched_at = ? WHERE review_id = ?`, ts(now), reviewID)
 	return err
 }
 
 // Setting returns a stored setting, or "" if unset.
-func (s *store) Setting(key string) (string, error) {
+func (s *Store) Setting(key string) (string, error) {
 	var v string
 	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -264,14 +266,14 @@ func (s *store) Setting(key string) (string, error) {
 }
 
 // SetSetting stores a setting, replacing any previous value.
-func (s *store) SetSetting(key, value string) error {
+func (s *Store) SetSetting(key, value string) error {
 	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
 }
 
 // RecordRun appends a run to the sync log.
-func (s *store) RecordRun(r syncRun) error {
+func (s *Store) RecordRun(r SyncRun) error {
 	_, err := s.db.Exec(`INSERT INTO sync_runs
 		(started_at, finished_at, kind, status, expected, found, added, removed, requests, error)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -280,29 +282,29 @@ func (s *store) RecordRun(r syncRun) error {
 }
 
 // LastRun returns the most recent sync run, if any.
-func (s *store) LastRun() (syncRun, bool, error) {
-	var r syncRun
+func (s *Store) LastRun() (SyncRun, bool, error) {
+	var r SyncRun
 	var started, finished string
 	err := s.db.QueryRow(`SELECT started_at, finished_at, kind, status, expected, found, added, removed, requests, error
 		FROM sync_runs ORDER BY id DESC LIMIT 1`).
 		Scan(&started, &finished, &r.Kind, &r.Status, &r.Expected, &r.Found, &r.Added, &r.Removed, &r.Requests, &r.Err)
 	if errors.Is(err, sql.ErrNoRows) {
-		return syncRun{}, false, nil
+		return SyncRun{}, false, nil
 	}
 	if err != nil {
-		return syncRun{}, false, err
+		return SyncRun{}, false, err
 	}
 	if r.StartedAt, err = time.Parse(time.RFC3339Nano, started); err != nil {
-		return syncRun{}, false, err
+		return SyncRun{}, false, err
 	}
 	if r.FinishedAt, err = time.Parse(time.RFC3339Nano, finished); err != nil {
-		return syncRun{}, false, err
+		return SyncRun{}, false, err
 	}
 	return r, true, nil
 }
 
 // LastFullSync returns when the last complete full harvest finished.
-func (s *store) LastFullSync() (time.Time, bool, error) {
+func (s *Store) LastFullSync() (time.Time, bool, error) {
 	var finished string
 	err := s.db.QueryRow(`SELECT finished_at FROM sync_runs
 		WHERE kind = 'full' AND status = 'synced' ORDER BY id DESC LIMIT 1`).Scan(&finished)
@@ -314,4 +316,15 @@ func (s *store) LastFullSync() (time.Time, bool, error) {
 	}
 	t, err := time.Parse(time.RFC3339Nano, finished)
 	return t, err == nil, err
+}
+
+// describe renders a run as a one-line summary for logs and the CLI.
+func (r SyncRun) Describe() string {
+	s := fmt.Sprintf("%s sync %s: expected=%d found=%d added=%d removed=%d requests=%d (%s)",
+		r.Kind, r.Status, r.Expected, r.Found, r.Added, r.Removed, r.Requests,
+		r.FinishedAt.Sub(r.StartedAt).Round(time.Second))
+	if r.Err != "" {
+		s += ": " + r.Err
+	}
+	return s
 }

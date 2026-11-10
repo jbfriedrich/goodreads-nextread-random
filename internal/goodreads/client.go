@@ -1,75 +1,29 @@
-package main
+package goodreads
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// Book is a single entry from a Goodreads shelf.
-type Book struct {
-	// ReviewID identifies the shelf entry (Goodreads' "review" of the book on
-	// this user's shelf). The widget always carries it, so it is the stable key.
-	ReviewID      string
-	Title         string
-	Author        string
-	AverageRating string
-	NumPages      string
-	Published     string
-	ISBN          string
-	Description   string
-	BookID        string
-	ImageURL      string
-}
-
-// BookURL returns the canonical Goodreads book page URL for this book. When the
-// book id is not known yet (e.g. a widget entry without a cover that has not
-// been enriched), it falls back to a Goodreads search for title and author.
-func (b Book) BookURL() string {
-	if b.BookID == "" {
-		return "https://www.goodreads.com/search?q=" + url.QueryEscape(strings.TrimSpace(b.Title+" "+b.Author))
-	}
-	return "https://www.goodreads.com/book/show/" + b.BookID
-}
-
-var tagRe = regexp.MustCompile(`<[^>]*>`)
-var wsRe = regexp.MustCompile(`\s+`)
-
-// cleanDescription strips HTML tags, unescapes entities, collapses whitespace,
-// and truncates to maxLen characters (appending "..." when truncated).
-func cleanDescription(desc string, maxLen int) string {
-	text := tagRe.ReplaceAllString(desc, " ")
-	text = html.UnescapeString(text)
-	text = strings.TrimSpace(wsRe.ReplaceAllString(text, " "))
-
-	if maxLen > 0 {
-		if runes := []rune(text); len(runes) > maxLen {
-			text = strings.TrimSpace(string(runes[:maxLen])) + "..."
-		}
-	}
-	return text
-}
-
-// userAgent identifies the app honestly to Goodreads and Open Library.
-const userAgent = "Mozilla/5.0 (goodreads-nextread)"
+// UserAgent identifies the app honestly to Goodreads and Open Library.
+const UserAgent = "Mozilla/5.0 (goodreads-nextread)"
 
 // maxBodyBytes bounds how much of a response is read (book pages are ~650 KB).
 const maxBodyBytes = 8 << 20
 
-// grClient talks to Goodreads' public, login-free endpoints for one user's
+// Client talks to Goodreads' public, login-free endpoints for one user's
 // shelf. It paces its own requests: consecutive requests are at least delay
 // apart. A client is meant to be used by one goroutine at a time; the sync and
 // enrichment loops each get their own.
-type grClient struct {
+type Client struct {
 	http   *http.Client
 	base   string // scheme://host, e.g. https://www.goodreads.com
 	userID string
@@ -89,22 +43,33 @@ type grClient struct {
 	sleep func(context.Context, time.Duration) error
 }
 
-// requestCount returns the number of HTTP round trips made so far.
-func (c *grClient) requestCount() int { return int(c.requests.Load()) }
+// RequestCount returns the number of HTTP round trips made so far.
+func (c *Client) RequestCount() int { return int(c.requests.Load()) }
 
-// newGRClient builds a client for the shelf described by cfg.
-func newGRClient(cfg *Config, delay time.Duration) *grClient {
-	return &grClient{
-		http:   &http.Client{Timeout: 30 * time.Second},
-		base:   cfg.BaseURL,
-		userID: cfg.UserID,
-		shelf:  cfg.Shelf,
-		delay:  delay,
+// Options configures a Client.
+type Options struct {
+	// HTTP is the client to use; nil means one with a 30 s timeout.
+	HTTP *http.Client
+	// BaseURL is scheme://host, e.g. https://www.goodreads.com.
+	BaseURL string
+	// UserID and Shelf identify the shelf.
+	UserID, Shelf string
+	// Delay is the minimum gap between requests.
+	Delay time.Duration
+	// Sleep waits between retries; nil means a real, context-aware sleep.
+	Sleep func(context.Context, time.Duration) error
+}
+
+// NewClient builds a client for one user's shelf.
+func NewClient(o Options) *Client {
+	if o.HTTP == nil {
+		o.HTTP = &http.Client{Timeout: 30 * time.Second}
 	}
+	return &Client{http: o.HTTP, base: o.BaseURL, userID: o.UserID, shelf: o.Shelf, delay: o.Delay, sleep: o.Sleep}
 }
 
 // pace blocks until delay has passed since the previous request.
-func (c *grClient) pace(ctx context.Context) error {
+func (c *Client) pace(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if wait := c.delay - time.Since(c.last); !c.last.IsZero() && wait > 0 {
@@ -124,7 +89,7 @@ func (c *grClient) pace(ctx context.Context) error {
 // redirects. Non-2xx responses are *httpStatusError. Transient failures (network,
 // 429, 5xx, 403) are retried in place with backoff; every attempt is paced and
 // counted.
-func (c *grClient) get(ctx context.Context, path string, query url.Values) (body []byte, final *url.URL, err error) {
+func (c *Client) get(ctx context.Context, path string, query url.Values) (body []byte, final *url.URL, err error) {
 	target := c.base + path
 	if len(query) > 0 {
 		target += "?" + query.Encode()
@@ -156,7 +121,7 @@ func (c *grClient) get(ctx context.Context, path string, query url.Values) (body
 // httpDo sends req with the app's User-Agent and returns the body and the
 // final URL after redirects. A non-2xx response is an *httpStatusError.
 func httpDo(client *http.Client, req *http.Request) ([]byte, *url.URL, error) {
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", UserAgent)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, err // *url.Error already names the method and URL
@@ -193,7 +158,7 @@ func redactQuery(target string) string {
 }
 
 // shelfCount reads the shelf's book count from the public profile page.
-func (c *grClient) shelfCount(ctx context.Context) (int, error) {
+func (c *Client) ShelfCount(ctx context.Context) (int, error) {
 	path := c.profilePath
 	if path == "" {
 		path = "/user/show/" + c.userID
@@ -221,7 +186,7 @@ func newWidgetID() string {
 }
 
 // widget fetches up to 100 shelf entries in the given order.
-func (c *grClient) widget(ctx context.Context, sortKey, order string) ([]Book, error) {
+func (c *Client) widget(ctx context.Context, sortKey, order string) ([]Book, error) {
 	q := url.Values{
 		"shelf":     {c.shelf},
 		"num_books": {"100"},

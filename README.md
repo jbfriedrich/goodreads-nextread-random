@@ -70,7 +70,7 @@ and `max_requests` (80), and `graphql_endpoint` (only if Goodreads moves its API
 ## Run
 
 ```sh
-go run .
+go run ./cmd/goodreads-nextread
 ```
 
 The first run has no stored shelf yet, so it harvests it (about a minute). Later
@@ -81,22 +81,22 @@ but no rating, pages or description.
 Sync the shelf on demand, which also shows whether Goodreads is reachable:
 
 ```sh
-go run . sync          # quick check, or a full harvest if needed
-go run . sync --full   # always harvest the whole shelf
+go run ./cmd/goodreads-nextread sync          # quick check, or a full harvest if needed
+go run ./cmd/goodreads-nextread sync --full   # always harvest the whole shelf
 # full sync synced: expected=636 found=636 added=636 removed=0 requests=40 (1m1s)
 ```
 
 Or build a binary:
 
 ```sh
-go build -o goodreads-nextread .
+go build -o goodreads-nextread ./cmd/goodreads-nextread
 ./goodreads-nextread
 ```
 
 Use a different config file with `--config`:
 
 ```sh
-go run . --config other.yaml
+go run ./cmd/goodreads-nextread --config other.yaml
 ```
 
 ## Example output
@@ -191,7 +191,7 @@ at the container's port 80. Health check: `GET /healthz` → `ok`.
 ### Run the server locally (no Docker)
 
 ```sh
-go run . serve                     # listens on :8080
+go run ./cmd/goodreads-nextread serve                     # listens on :8080
 # then open http://localhost:8080
 ```
 
@@ -200,3 +200,25 @@ go run . serve                     # listens on :8080
 ```sh
 go test ./...
 ```
+
+## Code layout
+
+```
+cmd/goodreads-nextread/   entry point: the CLI pick, `sync` and `serve` subcommands
+internal/
+  goodreads/              everything that talks to Goodreads: client with pacing and
+                          retries, shelf widget and profile, harvest and quick check,
+                          book pages, autocomplete, GraphQL
+    goodreadstest/        a fake Goodreads server for tests in every package
+  store/                  the SQLite copy of the shelf and the sync log
+  shelfsync/              keeps the store in line with Goodreads (quick check / harvest)
+  enrich/                 fills in book details in the background, plus Open Library covers
+  config/                 config.yaml loading and validation
+  web/                    the in-memory cache, HTTP handlers and the page template
+deploy/                   nginx config and the container entrypoint
+docs/                     design specs
+```
+
+Dependencies only point downwards, from `cmd` through `web`, `shelfsync` and
+`enrich` to `store` and `goodreads`. `goodreads` uses no database: the GraphQL
+key is stored through a small `KeyStore` interface.

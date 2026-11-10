@@ -7,46 +7,19 @@ import (
 	"math/rand"
 	"os"
 	"strings"
+
+	"goodreads-nextread/internal/config"
+	"goodreads-nextread/internal/goodreads"
+	"goodreads-nextread/internal/store"
 )
 
-const descriptionMaxLen = 300
-
-func main() {
-	// `serve` runs the HTTP server, `sync` syncs the shelf once; the default
-	// prints a random book.
-	if len(os.Args) > 1 {
-		var cmd func([]string) error
-		switch os.Args[1] {
-		case "serve":
-			cmd = serveCmd
-		case "sync":
-			cmd = syncCmd
-		}
-		if cmd != nil {
-			if err := cmd(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "error:", err)
-				os.Exit(1)
-			}
-			return
-		}
-	}
-
-	configPath := flag.String("config", "config.yaml", "path to config file")
-	flag.Parse()
-
-	if err := run(*configPath); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
-}
-
 func run(configPath string) error {
-	cfg, err := loadConfig(configPath)
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
 
-	st, err := openStore(cfg.DBPath)
+	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return err
 	}
@@ -60,11 +33,11 @@ func run(configPath string) error {
 		// First run: nothing stored yet, so harvest the shelf once (~1 min for
 		// a few hundred books). Later runs read the stored copy instantly.
 		fmt.Fprintln(os.Stderr, "No stored shelf yet; fetching it from Goodreads (this takes a minute)...")
-		run, err := newSyncer(cfg, st).sync(context.Background(), false)
+		run, err := newSyncer(cfg, st).Sync(context.Background(), false)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(os.Stderr, run.describe())
+		fmt.Fprintln(os.Stderr, run.Describe())
 		if books, err = st.AllBooks(); err != nil {
 			return err
 		}
@@ -86,24 +59,24 @@ func syncCmd(args []string) error {
 	full := fs.Bool("full", false, "always harvest the whole shelf instead of a quick check")
 	fs.Parse(args)
 
-	cfg, err := loadConfig(*configPath)
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return err
 	}
-	st, err := openStore(cfg.DBPath)
+	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	run, err := newSyncer(cfg, st).sync(context.Background(), *full)
-	fmt.Println(run.describe())
+	run, err := newSyncer(cfg, st).Sync(context.Background(), *full)
+	fmt.Println(run.Describe())
 	return err
 }
 
 // formatBook renders a single book as human-readable text. Fields that are
 // absent from the feed are omitted rather than printed blank.
-func formatBook(b Book) string {
+func formatBook(b goodreads.Book) string {
 	var sb strings.Builder
 
 	sb.WriteString("\n📚 Your next read:\n\n")
@@ -122,9 +95,9 @@ func formatBook(b Book) string {
 	if b.Published != "" {
 		sb.WriteString(fmt.Sprintf("  Published: %s\n", b.Published))
 	}
-	sb.WriteString(fmt.Sprintf("  Link:      %s\n", b.BookURL()))
+	sb.WriteString(fmt.Sprintf("  Link:      %s\n", b.URL()))
 
-	if desc := cleanDescription(b.Description, descriptionMaxLen); desc != "" {
+	if desc := goodreads.CleanDescription(b.Description, descriptionMaxLen); desc != "" {
 		sb.WriteString("\n  " + desc + "\n")
 	}
 

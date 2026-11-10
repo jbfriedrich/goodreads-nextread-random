@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"os"
@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"goodreads-nextread/internal/goodreads"
 )
 
 func TestParseListURL(t *testing.T) {
@@ -63,7 +65,7 @@ func TestLoadConfig(t *testing.T) {
 		path := filepath.Join(dir, "ok.yaml")
 		writeFile(t, path, validListURL)
 
-		cfg, err := loadConfig(path)
+		cfg, err := Load(path)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -83,7 +85,7 @@ func TestLoadConfig(t *testing.T) {
 		if cfg.RequestDelay != 1500*time.Millisecond || cfg.EnrichDelay != 2*time.Second || cfg.MaxRequests != 80 {
 			t.Errorf("tuning = %v/%v/%d", cfg.RequestDelay, cfg.EnrichDelay, cfg.MaxRequests)
 		}
-		if cfg.GraphQLEndpoint != defaultGraphQLEndpoint {
+		if cfg.GraphQLEndpoint != goodreads.DefaultGraphQLEndpoint {
 			t.Errorf("GraphQLEndpoint = %q, want the default", cfg.GraphQLEndpoint)
 		}
 	})
@@ -97,7 +99,7 @@ enrich_delay: "1m"
 max_requests: 120
 graphql_endpoint: "https://example.appsync-api.us-east-1.amazonaws.com/graphql"
 `)
-		cfg, err := loadConfig(path)
+		cfg, err := Load(path)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -129,7 +131,7 @@ graphql_endpoint: "https://example.appsync-api.us-east-1.amazonaws.com/graphql"
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(dir, strings.ReplaceAll(tt.name, " ", "-")+".yaml")
 			writeFile(t, path, tt.body)
-			_, err := loadConfig(path)
+			_, err := Load(path)
 			if err == nil {
 				t.Fatal("expected an error, got nil")
 			}
@@ -140,7 +142,7 @@ graphql_endpoint: "https://example.appsync-api.us-east-1.amazonaws.com/graphql"
 	}
 
 	t.Run("file not found", func(t *testing.T) {
-		if _, err := loadConfig(filepath.Join(dir, "does-not-exist.yaml")); err == nil {
+		if _, err := Load(filepath.Join(dir, "does-not-exist.yaml")); err == nil {
 			t.Fatal("expected error for missing file, got nil")
 		}
 	})

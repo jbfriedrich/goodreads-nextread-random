@@ -1,25 +1,27 @@
-package main
+package store
 
 import (
 	"path/filepath"
 	"sort"
 	"testing"
 	"time"
+
+	"goodreads-nextread/internal/goodreads"
 )
 
 var t0 = time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
 
-func newTestStore(t *testing.T) *store {
+func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := openStore(filepath.Join(t.TempDir(), "sub", "test.db"))
+	s, err := Open(filepath.Join(t.TempDir(), "sub", "test.db"))
 	if err != nil {
-		t.Fatalf("openStore: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
 }
 
-func reviewIDs(t *testing.T, s *store) []string {
+func reviewIDs(t *testing.T, s *Store) []string {
 	t.Helper()
 	books, err := s.AllBooks()
 	if err != nil {
@@ -47,7 +49,7 @@ func equalStrings(a, b []string) bool {
 
 func TestReconcileAddsBooks(t *testing.T) {
 	s := newTestStore(t)
-	added, removed, err := s.Reconcile([]Book{
+	added, removed, err := s.Reconcile([]goodreads.Book{
 		{ReviewID: "1", Title: "One", Author: "A", BookID: "11", ImageURL: "https://x/1.jpg"},
 		{ReviewID: "2", Title: "Two", Author: "B"},
 	}, true, t0)
@@ -62,7 +64,7 @@ func TestReconcileAddsBooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	byID := map[string]Book{}
+	byID := map[string]goodreads.Book{}
 	for _, b := range books {
 		byID[b.ReviewID] = b
 	}
@@ -76,9 +78,9 @@ func TestReconcileAddsBooks(t *testing.T) {
 
 func TestReconcileCompleteDeletesBooksNoLongerOnShelf(t *testing.T) {
 	s := newTestStore(t)
-	s.Reconcile([]Book{{ReviewID: "1"}, {ReviewID: "2"}, {ReviewID: "3"}}, true, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1"}, {ReviewID: "2"}, {ReviewID: "3"}}, true, t0)
 
-	added, removed, err := s.Reconcile([]Book{{ReviewID: "2"}, {ReviewID: "4"}}, true, t0.Add(time.Hour))
+	added, removed, err := s.Reconcile([]goodreads.Book{{ReviewID: "2"}, {ReviewID: "4"}}, true, t0.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,9 +94,9 @@ func TestReconcileCompleteDeletesBooksNoLongerOnShelf(t *testing.T) {
 
 func TestReconcilePartialNeverDeletes(t *testing.T) {
 	s := newTestStore(t)
-	s.Reconcile([]Book{{ReviewID: "1"}, {ReviewID: "2"}}, true, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1"}, {ReviewID: "2"}}, true, t0)
 
-	added, removed, err := s.Reconcile([]Book{{ReviewID: "3"}}, false, t0.Add(time.Hour))
+	added, removed, err := s.Reconcile([]goodreads.Book{{ReviewID: "3"}}, false, t0.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +112,7 @@ func TestReconcileCompleteWithEmptyShelfClearsIt(t *testing.T) {
 	// An empty result is only passed as complete when the profile count
 	// confirmed the shelf really is empty.
 	s := newTestStore(t)
-	s.Reconcile([]Book{{ReviewID: "1"}}, true, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1"}}, true, t0)
 	if _, removed, err := s.Reconcile(nil, true, t0); err != nil || removed != 1 {
 		t.Fatalf("removed=%d err=%v, want 1 and nil", removed, err)
 	}
@@ -121,7 +123,7 @@ func TestReconcileCompleteWithEmptyShelfClearsIt(t *testing.T) {
 
 func TestReconcileDeduplicatesInput(t *testing.T) {
 	s := newTestStore(t)
-	added, _, err := s.Reconcile([]Book{{ReviewID: "1"}, {ReviewID: "1"}}, true, t0)
+	added, _, err := s.Reconcile([]goodreads.Book{{ReviewID: "1"}, {ReviewID: "1"}}, true, t0)
 	if err != nil || added != 1 {
 		t.Fatalf("added=%d err=%v, want 1 and nil", added, err)
 	}
@@ -129,8 +131,8 @@ func TestReconcileDeduplicatesInput(t *testing.T) {
 
 func TestReconcilePreservesEnrichment(t *testing.T) {
 	s := newTestStore(t)
-	s.Reconcile([]Book{{ReviewID: "1", Title: "Old title"}}, true, t0)
-	if err := s.SaveEnrichment("1", Book{
+	s.Reconcile([]goodreads.Book{{ReviewID: "1", Title: "Old title"}}, true, t0)
+	if err := s.SaveEnrichment("1", goodreads.Book{
 		BookID: "11", Description: "A blurb", AverageRating: "4.10", NumPages: "300",
 		Published: "2024", ISBN: "9780000000001", ImageURL: "https://ol/cover.jpg",
 	}, t0); err != nil {
@@ -138,7 +140,7 @@ func TestReconcilePreservesEnrichment(t *testing.T) {
 	}
 
 	// A later scrape (no cover, no book id in the widget) must not wipe it.
-	s.Reconcile([]Book{{ReviewID: "1", Title: "New title", Author: "A"}}, true, t0.Add(time.Hour))
+	s.Reconcile([]goodreads.Book{{ReviewID: "1", Title: "New title", Author: "A"}}, true, t0.Add(time.Hour))
 
 	books, _ := s.AllBooks()
 	b := books[0]
@@ -154,10 +156,10 @@ func TestReconcilePreservesEnrichment(t *testing.T) {
 
 func TestReconcileWidgetBookIDOnlyFillsUnenrichedBooks(t *testing.T) {
 	s := newTestStore(t)
-	s.Reconcile([]Book{{ReviewID: "1", BookID: "old"}, {ReviewID: "2", BookID: "a"}}, true, t0)
-	s.SaveEnrichment("1", Book{BookID: "new", Description: "d"}, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1", BookID: "old"}, {ReviewID: "2", BookID: "a"}}, true, t0)
+	s.SaveEnrichment("1", goodreads.Book{BookID: "new", Description: "d"}, t0)
 
-	s.Reconcile([]Book{{ReviewID: "1", BookID: "old"}, {ReviewID: "2", BookID: "b"}}, true, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1", BookID: "old"}, {ReviewID: "2", BookID: "b"}}, true, t0)
 	books, _ := s.AllBooks()
 	got := map[string]string{}
 	for _, b := range books {
@@ -173,7 +175,7 @@ func TestReconcileWidgetBookIDOnlyFillsUnenrichedBooks(t *testing.T) {
 
 func TestMarkMissingClearsBookIDAndFinishesEnrichment(t *testing.T) {
 	s := newTestStore(t)
-	s.Reconcile([]Book{{ReviewID: "1", BookID: "dead"}}, true, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1", BookID: "dead"}}, true, t0)
 	if err := s.MarkMissing("1", t0); err != nil {
 		t.Fatal(err)
 	}
@@ -188,11 +190,11 @@ func TestMarkMissingClearsBookIDAndFinishesEnrichment(t *testing.T) {
 
 func TestReconcileWidgetCoverReplacesFallbackCover(t *testing.T) {
 	s := newTestStore(t)
-	s.Reconcile([]Book{{ReviewID: "1"}}, true, t0)
-	s.SaveEnrichment("1", Book{ImageURL: "https://ol/cover.jpg"}, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1"}}, true, t0)
+	s.SaveEnrichment("1", goodreads.Book{ImageURL: "https://ol/cover.jpg"}, t0)
 
 	// Goodreads later gets a real cover: it wins over the fallback.
-	s.Reconcile([]Book{{ReviewID: "1", ImageURL: "https://gr/cover.jpg", BookID: "11"}}, true, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1", ImageURL: "https://gr/cover.jpg", BookID: "11"}}, true, t0)
 	books, _ := s.AllBooks()
 	if books[0].ImageURL != "https://gr/cover.jpg" {
 		t.Errorf("ImageURL = %q, want the Goodreads cover", books[0].ImageURL)
@@ -201,8 +203,8 @@ func TestReconcileWidgetCoverReplacesFallbackCover(t *testing.T) {
 
 func TestSaveEnrichmentKeepsExistingValuesForEmptyFields(t *testing.T) {
 	s := newTestStore(t)
-	s.Reconcile([]Book{{ReviewID: "1", BookID: "11", ImageURL: "https://gr/cover.jpg"}}, true, t0)
-	s.SaveEnrichment("1", Book{Description: "Blurb"}, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1", BookID: "11", ImageURL: "https://gr/cover.jpg"}}, true, t0)
+	s.SaveEnrichment("1", goodreads.Book{Description: "Blurb"}, t0)
 
 	books, _ := s.AllBooks()
 	if books[0].BookID != "11" || books[0].ImageURL != "https://gr/cover.jpg" || books[0].Description != "Blurb" {
@@ -212,10 +214,10 @@ func TestSaveEnrichmentKeepsExistingValuesForEmptyFields(t *testing.T) {
 
 func TestPendingEnrichment(t *testing.T) {
 	s := newTestStore(t)
-	s.Reconcile([]Book{{ReviewID: "1"}, {ReviewID: "2"}, {ReviewID: "3"}}, true, t0)
-	s.SaveEnrichment("1", Book{Description: "done"}, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1"}, {ReviewID: "2"}, {ReviewID: "3"}}, true, t0)
+	s.SaveEnrichment("1", goodreads.Book{Description: "done"}, t0)
 	// A permanent failure is saved with nothing found; it is done too.
-	s.SaveEnrichment("2", Book{}, t0)
+	s.SaveEnrichment("2", goodreads.Book{}, t0)
 
 	pending, err := s.PendingEnrichment(10)
 	if err != nil {
@@ -248,7 +250,7 @@ func TestSettings(t *testing.T) {
 
 func TestHasAll(t *testing.T) {
 	s := newTestStore(t)
-	s.Reconcile([]Book{{ReviewID: "1"}, {ReviewID: "2"}}, true, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1"}, {ReviewID: "2"}}, true, t0)
 
 	if ok, err := s.HasAll([]string{"1", "2"}); err != nil || !ok {
 		t.Errorf("HasAll(known) = %v, %v; want true", ok, err)
@@ -271,13 +273,13 @@ func TestRunLog(t *testing.T) {
 		t.Fatal("LastFullSync on empty log reported a run")
 	}
 
-	full := syncRun{StartedAt: t0, FinishedAt: t0.Add(time.Minute), Kind: "full", Status: "synced",
+	full := SyncRun{StartedAt: t0, FinishedAt: t0.Add(time.Minute), Kind: "full", Status: "synced",
 		Expected: 636, Found: 636, Added: 636, Requests: 45}
-	quick := syncRun{StartedAt: t0.Add(6 * time.Hour), FinishedAt: t0.Add(6*time.Hour + time.Second),
+	quick := SyncRun{StartedAt: t0.Add(6 * time.Hour), FinishedAt: t0.Add(6*time.Hour + time.Second),
 		Kind: "quick", Status: "unchanged", Expected: 636, Found: 636, Requests: 2}
-	failed := syncRun{StartedAt: t0.Add(12 * time.Hour), FinishedAt: t0.Add(12 * time.Hour),
+	failed := SyncRun{StartedAt: t0.Add(12 * time.Hour), FinishedAt: t0.Add(12 * time.Hour),
 		Kind: "full", Status: "failed", Err: "boom"}
-	for _, r := range []syncRun{full, quick, failed} {
+	for _, r := range []SyncRun{full, quick, failed} {
 		if err := s.RecordRun(r); err != nil {
 			t.Fatalf("RecordRun: %v", err)
 		}
@@ -300,14 +302,14 @@ func TestRunLog(t *testing.T) {
 
 func TestStorePersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "persist.db")
-	s, err := openStore(path)
+	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.Reconcile([]Book{{ReviewID: "1", Title: "Kept"}}, true, t0)
+	s.Reconcile([]goodreads.Book{{ReviewID: "1", Title: "Kept"}}, true, t0)
 	s.Close()
 
-	s, err = openStore(path)
+	s, err = Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
