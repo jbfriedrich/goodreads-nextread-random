@@ -9,3 +9,6 @@
 # Local editor / OS / tooling
 .DS_Store
 .claude/
+
+# Local SQLite copy of the shelf
+/data/

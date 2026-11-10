@@ -11,13 +11,22 @@ services:
     ports:
       - "8080:80"
 
-    # Optional: swap the shelf without rebuilding the image.
-    # volumes:
-    #   - ./config.yaml:/app/config.yaml:ro
+    volumes:
+      # Persist the SQLite copy of the shelf across container rebuilds. A named
+      # volume (not a ./data bind mount) so it also works when the Docker
+      # context points at a remote host, where local paths do not exist.
+      - nextbook-data:/app/data
+      # Optional: swap the shelf without rebuilding the image.
+      # - ./config.yaml:/app/config.yaml:ro
 
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      # On first start with an empty data volume the server listens once the
+      # first 100 books are stored, a few seconds in.
+      start_period: 30s
+
+volumes:
+  nextbook-data:

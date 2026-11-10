@@ -15,6 +15,11 @@ FROM nginx:alpine
 
 COPY --from=build /goodreads-nextread /usr/local/bin/goodreads-nextread
 COPY config.yaml /app/config.yaml
+# The SQLite copy of the shelf lives here (db_path: data/nextread.db, relative
+# to the config). Mount a volume so it survives container rebuilds; without one
+# the shelf is re-harvested (~1 min) whenever the container is recreated.
+RUN mkdir -p /app/data
+VOLUME /app/data
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 COPY deploy/docker-entrypoint.sh /docker-entrypoint-app.sh
 RUN chmod +x /docker-entrypoint-app.sh

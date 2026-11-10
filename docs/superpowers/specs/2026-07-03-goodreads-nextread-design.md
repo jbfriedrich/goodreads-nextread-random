@@ -1,7 +1,8 @@
 # Goodreads NextRead — Design
 
 **Date:** 2026-07-03
-**Status:** Approved (pending spec review)
+**Status:** Data source superseded on 2026-11-09. Goodreads retired the RSS
+feeds; see [2026-11-09-widget-sync-design.md](2026-11-09-widget-sync-design.md).
 
 ## Purpose
 

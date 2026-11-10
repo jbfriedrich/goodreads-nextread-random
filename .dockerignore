@@ -4,3 +4,5 @@ README.md
 *_test.go
 Dockerfile
 .dockerignore
+data/
+testdata/

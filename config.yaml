@@ -1,10 +1,22 @@
 # The Goodreads shelf URL, copied from your browser.
-# Replace YOUR_USER_ID with your Goodreads user id (the number in the URL);
-# the shelf must be public. The tool derives the RSS endpoint
-# (/review/list_rss/...) from this automatically.
+# Replace YOUR_USER_ID with your Goodreads user id (the number in the URL) and
+# keep the ?shelf=... parameter. No login is needed, but the profile and shelf
+# must be public: the shelf is read through Goodreads' public shelf widget and
+# its size is checked against the count on the public profile page.
 list_url: "https://www.goodreads.com/review/list/YOUR_USER_ID?shelf=to-read"
 
-# Web server only: how often the shelf is refreshed from Goodreads in the
-# background. Accepts a Go duration (e.g. "30m", "1h", "90m"). Optional;
-# defaults to 30m. Has no effect on the CLI.
-refresh_interval: "30m"
+# How many times a day the shelf is synced with Goodreads (1-1440). Most syncs
+# are a 2-request check, which also picks up newly added books; a full harvest
+# (~40 requests for ~600 books) runs only when books were removed, plus weekly.
+# Optional; defaults to 4. The --scrapes-per-day flag of `serve` overrides it.
+scrapes_per_day: 4
+
+# Where the SQLite copy of the shelf is kept. A relative path is resolved
+# against this file's directory. Optional; defaults to data/nextread.db.
+db_path: "data/nextread.db"
+
+# Optional tuning (Go durations / counts), shown with their defaults:
+# request_delay: "1.5s"  # gap between requests while syncing
+# enrich_delay: "2s"     # gap between enrichment requests (25 books per request)
+# max_requests: 80       # cap on requests per full harvest
+# graphql_endpoint: ""   # override only if Goodreads moves its GraphQL API

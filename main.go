@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -11,13 +12,23 @@ import (
 const descriptionMaxLen = 300
 
 func main() {
-	// `serve` subcommand runs the HTTP server; default runs the CLI.
-	if len(os.Args) > 1 && os.Args[1] == "serve" {
-		if err := serveCmd(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
+	// `serve` runs the HTTP server, `sync` syncs the shelf once; the default
+	// prints a random book.
+	if len(os.Args) > 1 {
+		var cmd func([]string) error
+		switch os.Args[1] {
+		case "serve":
+			cmd = serveCmd
+		case "sync":
+			cmd = syncCmd
 		}
-		return
+		if cmd != nil {
+			if err := cmd(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			return
+		}
 	}
 
 	configPath := flag.String("config", "config.yaml", "path to config file")
@@ -35,9 +46,28 @@ func run(configPath string) error {
 		return err
 	}
 
-	books, err := fetchShelf(cfg.RSSURL)
+	st, err := openStore(cfg.DBPath)
 	if err != nil {
 		return err
+	}
+	defer st.Close()
+
+	books, err := st.AllBooks()
+	if err != nil {
+		return err
+	}
+	if len(books) == 0 {
+		// First run: nothing stored yet, so harvest the shelf once (~1 min for
+		// a few hundred books). Later runs read the stored copy instantly.
+		fmt.Fprintln(os.Stderr, "No stored shelf yet; fetching it from Goodreads (this takes a minute)...")
+		run, err := newSyncer(cfg, st).sync(context.Background(), false)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, run.describe())
+		if books, err = st.AllBooks(); err != nil {
+			return err
+		}
 	}
 	if len(books) == 0 {
 		return fmt.Errorf("no books found on the shelf — check list_url in %s", configPath)
@@ -46,6 +76,29 @@ func run(configPath string) error {
 	pick := books[rand.Intn(len(books))]
 	fmt.Print(formatBook(pick))
 	return nil
+}
+
+// syncCmd syncs the shelf once (the `sync` subcommand) and prints a summary.
+// It applies the same quick-check logic as the server unless --full is given.
+func syncCmd(args []string) error {
+	fs := flag.NewFlagSet("sync", flag.ExitOnError)
+	configPath := fs.String("config", "config.yaml", "path to config file")
+	full := fs.Bool("full", false, "always harvest the whole shelf instead of a quick check")
+	fs.Parse(args)
+
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	st, err := openStore(cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	run, err := newSyncer(cfg, st).sync(context.Background(), *full)
+	fmt.Println(run.describe())
+	return err
 }
 
 // formatBook renders a single book as human-readable text. Fields that are

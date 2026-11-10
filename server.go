@@ -14,10 +14,10 @@ import (
 	"time"
 )
 
-// shelfCache holds the shelf's books in memory. The list is primed once at
-// startup and refreshed by a background goroutine (see run), so requests never
-// block on the network. On a refresh failure it keeps serving the last good
-// copy.
+// shelfCache holds the shelf's books in memory so requests never touch the
+// network or the disk. It is loaded from the store at startup and reloaded
+// after every successful sync and enrichment. On a refresh failure it keeps
+// serving the last good copy.
 type shelfCache struct {
 	fetch func() ([]Book, error)
 
@@ -46,24 +46,6 @@ func (c *shelfCache) get() []Book {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.books
-}
-
-// run refreshes the shelf every interval until ctx is cancelled. A failed
-// refresh is logged and the previous list is retained.
-func (c *shelfCache) run(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := c.refresh(); err != nil {
-				log.Printf("background shelf refresh failed, keeping previous list: %v", err)
-			}
-		}
-	}
 }
 
 // bookHandler serves a random book from the cache as an HTML page.
@@ -128,49 +110,120 @@ func renderPage(b Book) string {
 	return sb.String()
 }
 
+// healthHandler reports liveness only. /healthz is reachable from outside
+// (nginx proxies it), so sync status goes to the logs, never here. It is always
+// 200: a failed sync does not stop the site serving the stored shelf, and
+// restarting the container would not fix Goodreads.
+func healthHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "ok")
+	})
+}
+
+// startSync gets the cache ready to serve and keeps the shelf synced in the
+// background. With a stored shelf it returns immediately. With an empty store
+// it starts the initial harvest and returns as soon as the first batch (the
+// newest 100 books) is servable, a few seconds in; the rest arrives in the
+// background. It returns an error only if the initial harvest fails before
+// anything could be stored.
+func startSync(ctx context.Context, sy *syncer, cache *shelfCache, interval time.Duration) error {
+	reload := func() {
+		if err := cache.refresh(); err != nil {
+			log.Printf("reloading shelf from the store failed, keeping previous list: %v", err)
+		}
+	}
+	if len(cache.get()) > 0 {
+		go sy.loop(ctx, interval, reload)
+		return nil
+	}
+
+	ready := make(chan struct{})
+	var once sync.Once
+	markReady := func() { once.Do(func() { close(ready) }) }
+	sy.onProgress = func() {
+		reload()
+		if len(cache.get()) > 0 {
+			markReady()
+		}
+	}
+
+	failed := make(chan error, 1)
+	go func() {
+		run, err := sy.sync(ctx, false)
+		reload()
+		if err != nil {
+			if len(cache.get()) == 0 {
+				failed <- err
+				return // nothing to serve: the caller exits, so no loop
+			}
+			log.Printf("initial shelf harvest failed after storing %d books, serving those: %s", len(cache.get()), run.describe())
+		} else {
+			log.Print(run.describe())
+		}
+		markReady() // also covers a genuinely empty shelf
+		sy.loop(ctx, interval, reload)
+	}()
+
+	select {
+	case <-ready:
+		return nil
+	case err := <-failed:
+		return fmt.Errorf("initial shelf harvest: %w", err)
+	}
+}
+
 // serveCmd runs the HTTP server (the `serve` subcommand).
 func serveCmd(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	configPath := fs.String("config", "config.yaml", "path to config file")
 	addr := fs.String("addr", envOr("ADDR", ":8080"), "address to listen on")
-	refresh := fs.Duration("refresh-interval", 0, "how often to refresh the shelf in the background (0 = use config)")
+	perDay := fs.Int("scrapes-per-day", 0, "how many times a day to sync the shelf (0 = use config)")
 	fs.Parse(args)
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		return err
 	}
-
-	interval := cfg.RefreshInterval
-	if *refresh > 0 {
-		interval = *refresh
+	if *perDay > 0 {
+		if *perDay > maxScrapesPerDay {
+			return fmt.Errorf("--scrapes-per-day must be at most %d", maxScrapesPerDay)
+		}
+		cfg.ScrapesPerDay = *perDay
 	}
 
-	cache := &shelfCache{
-		fetch: func() ([]Book, error) {
-			log.Printf("refreshing shelf from %s", cfg.RSSURL)
-			return fetchShelf(cfg.RSSURL)
-		},
+	st, err := openStore(cfg.DBPath)
+	if err != nil {
+		return err
 	}
+	defer st.Close()
 
-	// Prime the shelf before accepting traffic so no visitor waits on the
-	// initial fetch. A failure here is fatal: the container's restart policy
-	// will retry the startup.
-	log.Printf("priming shelf before serving...")
+	cache := &shelfCache{fetch: st.AllBooks}
 	if err := cache.refresh(); err != nil {
-		return fmt.Errorf("priming shelf on startup: %w", err)
+		return fmt.Errorf("loading stored shelf: %w", err)
 	}
 
-	// Keep the shelf current in the background so requests never block on
-	// Goodreads and shelf changes get picked up within one interval.
-	go cache.run(context.Background(), interval)
-	log.Printf("shelf primed; refreshing every %s in the background", interval)
+	ctx := context.Background()
+	if len(cache.get()) == 0 {
+		log.Printf("no stored shelf yet; harvesting %s/%s, serving once the first books are in", cfg.UserID, cfg.Shelf)
+	}
+	// A failure here (nothing could be fetched at all) is fatal so the
+	// container's restart policy retries.
+	if err := startSync(ctx, newSyncer(cfg, st), cache, cfg.SyncInterval()); err != nil {
+		return err
+	}
+	log.Printf("serving %d books from %s; syncing %d times a day", len(cache.get()), cfg.DBPath, cfg.ScrapesPerDay)
+
+	// Fill in descriptions, ratings and covers in the background; the cache
+	// reloads after each batch so details appear as they arrive.
+	go newEnricher(cfg, st).run(ctx, func() {
+		if err := cache.refresh(); err != nil {
+			log.Printf("reloading shelf from the store failed, keeping previous list: %v", err)
+		}
+	})
 
 	mux := http.NewServeMux()
 	mux.Handle("/", bookHandler(cache))
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "ok")
-	})
+	mux.Handle("/healthz", healthHandler())
 
 	srv := &http.Server{
 		Addr:         *addr,
