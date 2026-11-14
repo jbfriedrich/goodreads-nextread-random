@@ -1,3 +1,5 @@
+name: nextbook
+
 services:
   nextbook:
     build: .
@@ -15,7 +17,7 @@ services:
       # Persist the SQLite copy of the shelf across container rebuilds. A named
       # volume (not a ./data bind mount) so it also works when the Docker
       # context points at a remote host, where local paths do not exist.
-      - nextbook-data:/app/data
+      - nb_data:/app/data
       # Optional: swap the shelf without rebuilding the image.
       # - ./config.yaml:/app/config.yaml:ro
 
@@ -29,4 +31,4 @@ services:
       start_period: 30s
 
 volumes:
-  nextbook-data:
+  nb_data:

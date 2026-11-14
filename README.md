@@ -207,7 +207,7 @@ Since your Docker CLI targets your remote server (context `<context>`), a plain
 
 ```sh
 docker run -d --name nextbook --restart unless-stopped -p 8080:80 \
-  -v nextbook-data:/app/data \
+  -v nb_data:/app/data \
   <your-registry>/nextbook:latest
 ```
 
