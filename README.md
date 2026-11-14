@@ -62,10 +62,30 @@ browser address bar):
 list_url: "https://www.goodreads.com/review/list/12345678?shelf=to-read"
 ```
 
-The shelf and profile must be public. Optional settings (see `config.yaml`):
-`scrapes_per_day` (default 4), `db_path` (default `data/nextread.db`, relative
-to the config file), the tuning knobs `request_delay` (1.5s), `enrich_delay` (2s)
-and `max_requests` (80), and `graphql_endpoint` (only if Goodreads moves its API).
+The shelf and profile must be public.
+
+All other settings are optional. Most can also be set with an environment
+variable, which **overrides** `config.yaml`. That is handy because the file is
+baked into the Docker image. Durations are Go durations such as `90s`, `15m` or
+`168h` (there is no `d` unit).
+
+| `config.yaml` key | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `list_url` | `NEXTREAD_LIST_URL` | (required) | The shelf to pick from |
+| `scrapes_per_day` | `NEXTREAD_SCRAPES_PER_DAY` | `4` | Syncs per day (1–1440) |
+| `request_delay` | `NEXTREAD_REQUEST_DELAY` | `1.5s` | Gap between sync requests |
+| `enrich_delay` | `NEXTREAD_ENRICH_DELAY` | `2s` | Gap between enrichment requests |
+| `max_requests` | `NEXTREAD_MAX_REQUESTS` | `80` | Request cap per full harvest (at least 3) |
+| `http_timeout` | `NEXTREAD_HTTP_TIMEOUT` | `30s` | Timeout of each HTTP request |
+| `full_harvest_every` | `NEXTREAD_FULL_HARVEST_EVERY` | `168h` | Safety-net full harvest, even without changes |
+| `sync_retry_after` | `NEXTREAD_SYNC_RETRY_AFTER` | `1h` | Longest wait before retrying a failed sync |
+| `enrich_error_pause` | `NEXTREAD_ENRICH_ERROR_PAUSE` | `5m` | Enrichment pause after an error whose retries ran out |
+| `db_path` | – | `data/nextread.db` | SQLite file, relative to the config file |
+| `graphql_endpoint` | – | Goodreads' | Only if Goodreads moves its GraphQL API |
+
+Precedence: `serve --scrapes-per-day` beats the environment, which beats
+`config.yaml`, which beats the default. An empty variable counts as unset.
+Invalid values stop the app at startup with an error naming the variable.
 
 ## Run
 
@@ -196,11 +216,21 @@ at the container's port 80. Health check: `GET /healthz` → `ok`.
 
 ### Configuration knobs
 
-- **Different shelf without rebuilding:** mount your own config over the baked
-  one — `-v /path/to/config.yaml:/app/config.yaml:ro`.
-- **Sync frequency:** set `scrapes_per_day` in `config.yaml` (default 4). The
-  `--scrapes-per-day` flag of `serve` overrides it. The old `refresh_interval`
-  setting is rejected with a pointer to its replacement.
+- **Without rebuilding:** set environment variables (see the table under
+  [Configure](#configure)), for example in `docker-compose.yaml`:
+
+  ```yaml
+      environment:
+        NEXTREAD_LIST_URL: "https://www.goodreads.com/review/list/12345678?shelf=to-read"
+        NEXTREAD_SCRAPES_PER_DAY: "6"
+        NEXTREAD_HTTP_TIMEOUT: "45s"
+  ```
+
+  Or mount your own config over the baked one with
+  `-v /path/to/config.yaml:/app/config.yaml:ro`.
+- **Sync frequency:** `scrapes_per_day` / `NEXTREAD_SCRAPES_PER_DAY` (default 4).
+  The `--scrapes-per-day` flag of `serve` overrides both. The old
+  `refresh_interval` setting is rejected with a pointer to its replacement.
 - **Listen address:** the server accepts `--addr` (or the `ADDR` env var);
   the default is fine for the container.
 

@@ -84,14 +84,33 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// clientOptions maps the config onto a Goodreads client paced at delay.
+func clientOptions(cfg *config.Config, delay time.Duration) goodreads.Options {
+	return goodreads.Options{
+		HTTP:    &http.Client{Timeout: cfg.HTTPTimeout},
+		BaseURL: cfg.BaseURL,
+		UserID:  cfg.UserID,
+		Shelf:   cfg.Shelf,
+		Delay:   delay,
+	}
+}
+
 // newSyncer builds the shelf syncer from the config.
 func newSyncer(cfg *config.Config, st *store.Store) *shelfsync.Syncer {
-	gr := goodreads.NewClient(goodreads.Options{BaseURL: cfg.BaseURL, UserID: cfg.UserID, Shelf: cfg.Shelf, Delay: cfg.RequestDelay})
-	return shelfsync.New(gr, st, cfg.MaxRequests)
+	gr := goodreads.NewClient(clientOptions(cfg, cfg.RequestDelay))
+	return shelfsync.New(gr, st, shelfsync.Settings{
+		MaxRequests: cfg.MaxRequests,
+		FullEvery:   cfg.FullHarvestEvery,
+		RetryAfter:  cfg.SyncRetryAfter,
+	})
 }
 
 // newEnricher builds the enricher from the config, with its own paced client.
 func newEnricher(cfg *config.Config, st *store.Store) *enrich.Enricher {
-	gr := goodreads.NewClient(goodreads.Options{BaseURL: cfg.BaseURL, UserID: cfg.UserID, Shelf: cfg.Shelf, Delay: cfg.EnrichDelay})
-	return enrich.New(gr, goodreads.NewGraphQL(nil, cfg.GraphQLEndpoint, gr, st), st)
+	gr := goodreads.NewClient(clientOptions(cfg, cfg.EnrichDelay))
+	gql := goodreads.NewGraphQL(&http.Client{Timeout: cfg.HTTPTimeout}, cfg.GraphQLEndpoint, gr, st)
+	return enrich.New(gr, gql, st, enrich.Settings{
+		HTTPTimeout: cfg.HTTPTimeout,
+		ErrorPause:  cfg.EnrichErrorPause,
+	})
 }

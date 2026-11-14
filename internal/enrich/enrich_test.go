@@ -117,7 +117,7 @@ func newEnrichFixture(t *testing.T) *enrichFixture {
 			return ctx.Err()
 		},
 	})
-	fx.e = New(gr, goodreads.NewGraphQL(fx.f.Server.Client(), fx.f.Server.URL+"/graphql", gr, fx.store), fx.store)
+	fx.e = New(gr, goodreads.NewGraphQL(fx.f.Server.Client(), fx.f.Server.URL+"/graphql", gr, fx.store), fx.store, Settings{})
 	fx.e.ol = &openLibrary{http: fx.ol.Client(), base: fx.ol.URL}
 	fx.e.now = func() time.Time { return t0 }
 	return fx
@@ -525,4 +525,28 @@ func TestEnrichLoopNotifiesAfterEachBatch(t *testing.T) {
 		}
 	}
 	waitFor(t, "the backlog to empty", func() bool { return pendingCount(t, fx.store) == 0 })
+}
+
+func TestEnrichLoopPausesForConfiguredTimeAfterError(t *testing.T) {
+	// With the default 5-minute pause this test would time out: it passes only
+	// if the configured pause is used.
+	fx := newEnrichFixture(t)
+	fx.addBooks(3)
+	fx.store.SetSetting(goodreads.SettingGraphQLKey, goodreadstest.APIKey)
+	fx.e.errorPause = 20 * time.Millisecond
+	fx.f.Set(func(f *goodreadstest.Fake) { f.GQLFail = 1 + goodreads.MaxRetries() }) // exactly one failed step
+
+	done := make(chan struct{}, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go fx.e.Run(ctx, func() { done <- struct{}{} })
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enrichment did not resume after the configured pause")
+	}
+	if got := pendingCount(t, fx.store); got != 0 {
+		t.Errorf("pending = %d, want 0", got)
+	}
 }

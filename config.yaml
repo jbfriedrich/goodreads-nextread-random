@@ -16,7 +16,16 @@ scrapes_per_day: 4
 db_path: "data/nextread.db"
 
 # Optional tuning (Go durations / counts), shown with their defaults:
-# request_delay: "1.5s"  # gap between requests while syncing
-# enrich_delay: "2s"     # gap between enrichment requests (25 books per request)
-# max_requests: 80       # cap on requests per full harvest
-# graphql_endpoint: ""   # override only if Goodreads moves its GraphQL API
+# request_delay: "1.5s"       # gap between requests while syncing
+# enrich_delay: "2s"          # gap between enrichment requests (25 books per request)
+# max_requests: 80            # cap on requests per full harvest
+# http_timeout: "30s"         # timeout of each HTTP request
+# full_harvest_every: "168h"  # safety-net full harvest even without changes
+# sync_retry_after: "1h"      # longest wait before retrying a failed sync
+# enrich_error_pause: "5m"    # enrichment pause after an error whose retries ran out
+# graphql_endpoint: ""        # override only if Goodreads moves its GraphQL API
+#
+# Every setting above except db_path and graphql_endpoint, plus list_url, can
+# also be set with an environment variable that overrides this file:
+# NEXTREAD_ + the key in upper case, e.g. NEXTREAD_REQUEST_DELAY=2s or
+# NEXTREAD_LIST_URL=... (handy because this file is baked into the image).

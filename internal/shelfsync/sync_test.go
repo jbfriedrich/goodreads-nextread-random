@@ -45,7 +45,7 @@ type syncFixture struct {
 func newSyncFixture(t *testing.T, n int) *syncFixture {
 	t.Helper()
 	fx := &syncFixture{f: goodreadstest.New(t, n), store: newTestStore(t), now: t0}
-	fx.s = New(newClient(fx.f), fx.store, 80)
+	fx.s = New(newClient(fx.f), fx.store, Settings{MaxRequests: 80})
 	fx.s.now = func() time.Time { return fx.now }
 	return fx
 }
@@ -315,6 +315,32 @@ func TestUntilNextSchedulesFromRunLog(t *testing.T) {
 	fx.now = t0.Add(7 * time.Hour)
 	if d := fx.s.UntilNext(6 * time.Hour); d != 0 {
 		t.Errorf("untilNext when overdue = %v, want 0", d)
+	}
+}
+
+func TestUntilNextUsesConfiguredRetryWait(t *testing.T) {
+	fx := newSyncFixture(t, 5)
+	fx.s = New(newClient(fx.f), fx.store, Settings{MaxRequests: 80, RetryAfter: 10 * time.Minute})
+	fx.s.now = func() time.Time { return fx.now }
+	fx.store.RecordRun(store.SyncRun{StartedAt: t0, FinishedAt: t0, Kind: "full", Status: "failed", Err: "x"})
+	if d := fx.s.UntilNext(6 * time.Hour); d != 10*time.Minute {
+		t.Errorf("UntilNext after a failure = %v, want the configured 10m", d)
+	}
+}
+
+func TestSyncUsesConfiguredFullHarvestInterval(t *testing.T) {
+	fx := newSyncFixture(t, 150)
+	fx.s = New(newClient(fx.f), fx.store, Settings{MaxRequests: 80, FullEvery: 12 * time.Hour})
+	fx.s.now = func() time.Time { return fx.now }
+	fx.sync(t)
+
+	fx.now = t0.Add(6 * time.Hour)
+	if run := fx.sync(t); run.Kind != "quick" {
+		t.Errorf("run kind = %s after 6h, want quick", run.Kind)
+	}
+	fx.now = t0.Add(13 * time.Hour)
+	if run := fx.sync(t); run.Kind != "full" {
+		t.Errorf("run kind = %s after 13h with a 12h interval, want full", run.Kind)
 	}
 }
 

@@ -191,7 +191,7 @@ type startFixture struct {
 func newStartFixture(t *testing.T, n int) (*startFixture, *Cache, context.Context) {
 	t.Helper()
 	fx := &startFixture{f: goodreadstest.New(t, n), store: newTestStore(t)}
-	fx.s = shelfsync.New(newClient(fx.f), fx.store, 80)
+	fx.s = shelfsync.New(newClient(fx.f), fx.store, shelfsync.Settings{MaxRequests: 80})
 	cache := NewCache(fx.store.AllBooks)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

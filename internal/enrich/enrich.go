@@ -20,8 +20,12 @@ import (
 // the public book page when GraphQL is unavailable.
 
 const (
-	enrichIdlePoll        = time.Minute
-	enrichErrorPause      = 5 * time.Minute
+	enrichIdlePoll = time.Minute
+	// DefaultErrorPause is how long enrichment pauses after an error whose
+	// retries ran out.
+	DefaultErrorPause = 5 * time.Minute
+	// DefaultHTTPTimeout bounds each Open Library request.
+	DefaultHTTPTimeout    = 30 * time.Second
 	openLibraryCoversBase = "https://covers.openlibrary.org"
 )
 
@@ -32,23 +36,41 @@ type Enricher struct {
 	ol    *openLibrary
 	store *store.Store
 	now   func() time.Time
+
+	errorPause time.Duration
+}
+
+// Settings tunes an Enricher; zero values mean the defaults.
+type Settings struct {
+	// HTTPTimeout bounds each Open Library request (DefaultHTTPTimeout).
+	HTTPTimeout time.Duration
+	// ErrorPause is the pause after an error whose retries ran out
+	// (DefaultErrorPause).
+	ErrorPause time.Duration
 }
 
 // New builds an Enricher. gr is a Client dedicated to enrichment (its delay
 // paces the enrichment requests) and gql the GraphQL client built on it.
-func New(gr *goodreads.Client, gql *goodreads.GraphQL, st *store.Store) *Enricher {
+func New(gr *goodreads.Client, gql *goodreads.GraphQL, st *store.Store, set Settings) *Enricher {
+	if set.HTTPTimeout <= 0 {
+		set.HTTPTimeout = DefaultHTTPTimeout
+	}
+	if set.ErrorPause <= 0 {
+		set.ErrorPause = DefaultErrorPause
+	}
 	return &Enricher{
-		gr:    gr,
-		gql:   gql,
-		ol:    &openLibrary{http: &http.Client{Timeout: 30 * time.Second}, base: openLibraryCoversBase},
-		store: st,
-		now:   time.Now,
+		gr:         gr,
+		gql:        gql,
+		ol:         &openLibrary{http: &http.Client{Timeout: set.HTTPTimeout}, base: openLibraryCoversBase},
+		store:      st,
+		now:        time.Now,
+		errorPause: set.ErrorPause,
 	}
 }
 
 // run enriches batches until ctx is cancelled, calling onEnriched after each
 // batch and logging progress. Pacing comes from the client's delay. After an
-// error (transient failures whose retries ran out) it pauses enrichErrorPause;
+// error (transient failures whose retries ran out) it pauses errorPause;
 // with nothing pending it polls the store every enrichIdlePoll.
 func (e *Enricher) Run(ctx context.Context, onEnriched func()) {
 	for {
@@ -59,8 +81,8 @@ func (e *Enricher) Run(ctx context.Context, onEnriched func()) {
 		wait := enrichIdlePoll
 		switch {
 		case err != nil:
-			log.Printf("enrichment paused for %s: %v", enrichErrorPause, err)
-			wait = enrichErrorPause
+			log.Printf("enrichment paused for %s: %v", e.errorPause, err)
+			wait = e.errorPause
 		case n > 0:
 			onEnriched()
 			pending, _ := e.store.PendingEnrichmentCount()

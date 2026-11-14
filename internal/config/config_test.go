@@ -154,3 +154,127 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("writing %s: %v", path, err)
 	}
 }
+
+func TestTimingDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	writeFile(t, path, validListURL)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTPTimeout != 30*time.Second || cfg.FullHarvestEvery != 7*24*time.Hour ||
+		cfg.SyncRetryAfter != time.Hour || cfg.EnrichErrorPause != 5*time.Minute {
+		t.Errorf("timings = %v / %v / %v / %v; want 30s / 168h / 1h / 5m",
+			cfg.HTTPTimeout, cfg.FullHarvestEvery, cfg.SyncRetryAfter, cfg.EnrichErrorPause)
+	}
+}
+
+func TestTimingFileKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	writeFile(t, path, validListURL+`http_timeout: 10s
+full_harvest_every: 24h
+sync_retry_after: 20m
+enrich_error_pause: 2m
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTPTimeout != 10*time.Second || cfg.FullHarvestEvery != 24*time.Hour ||
+		cfg.SyncRetryAfter != 20*time.Minute || cfg.EnrichErrorPause != 2*time.Minute {
+		t.Errorf("timings = %v / %v / %v / %v", cfg.HTTPTimeout, cfg.FullHarvestEvery, cfg.SyncRetryAfter, cfg.EnrichErrorPause)
+	}
+}
+
+func TestEnvironmentOverridesConfigFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	writeFile(t, path, validListURL+"scrapes_per_day: 8\nrequest_delay: 3s\nhttp_timeout: 10s\n")
+	t.Setenv("NEXTREAD_LIST_URL", "https://www.goodreads.com/review/list/999?shelf=favourites")
+	t.Setenv("NEXTREAD_SCRAPES_PER_DAY", "12")
+	t.Setenv("NEXTREAD_REQUEST_DELAY", "250ms")
+	t.Setenv("NEXTREAD_ENRICH_DELAY", "5s")
+	t.Setenv("NEXTREAD_MAX_REQUESTS", "120")
+	t.Setenv("NEXTREAD_HTTP_TIMEOUT", "45s")
+	t.Setenv("NEXTREAD_FULL_HARVEST_EVERY", "72h")
+	t.Setenv("NEXTREAD_SYNC_RETRY_AFTER", "15m")
+	t.Setenv("NEXTREAD_ENRICH_ERROR_PAUSE", "90s")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UserID != "999" || cfg.Shelf != "favourites" {
+		t.Errorf("shelf = %s/%s, want 999/favourites from NEXTREAD_LIST_URL", cfg.UserID, cfg.Shelf)
+	}
+	checks := []struct {
+		name      string
+		got, want any
+	}{
+		{"ScrapesPerDay", cfg.ScrapesPerDay, 12},
+		{"RequestDelay", cfg.RequestDelay, 250 * time.Millisecond},
+		{"EnrichDelay", cfg.EnrichDelay, 5 * time.Second},
+		{"MaxRequests", cfg.MaxRequests, 120},
+		{"HTTPTimeout", cfg.HTTPTimeout, 45 * time.Second},
+		{"FullHarvestEvery", cfg.FullHarvestEvery, 72 * time.Hour},
+		{"SyncRetryAfter", cfg.SyncRetryAfter, 15 * time.Minute},
+		{"EnrichErrorPause", cfg.EnrichErrorPause, 90 * time.Second},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v from the environment", c.name, c.got, c.want)
+		}
+	}
+}
+
+func TestListURLFromEnvironmentOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	writeFile(t, path, "scrapes_per_day: 2\n")
+	t.Setenv("NEXTREAD_LIST_URL", "https://www.goodreads.com/review/list/42?shelf=to-read")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UserID != "42" {
+		t.Errorf("UserID = %q, want 42", cfg.UserID)
+	}
+}
+
+func TestEmptyEnvironmentVariableIsIgnored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	writeFile(t, path, validListURL+"request_delay: 3s\n")
+	t.Setenv("NEXTREAD_REQUEST_DELAY", "")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RequestDelay != 3*time.Second {
+		t.Errorf("RequestDelay = %v, want the file's 3s", cfg.RequestDelay)
+	}
+}
+
+func TestInvalidEnvironmentValuesNameTheVariable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	writeFile(t, path, validListURL)
+	for env, value := range map[string]string{
+		"NEXTREAD_LIST_URL":           "https://example.com/nope",
+		"NEXTREAD_SCRAPES_PER_DAY":    "lots",
+		"NEXTREAD_REQUEST_DELAY":      "soon",
+		"NEXTREAD_ENRICH_DELAY":       "-1s",
+		"NEXTREAD_MAX_REQUESTS":       "1",
+		"NEXTREAD_HTTP_TIMEOUT":       "0s",
+		"NEXTREAD_FULL_HARVEST_EVERY": "7d",
+		"NEXTREAD_SYNC_RETRY_AFTER":   "0",
+		"NEXTREAD_ENRICH_ERROR_PAUSE": "x",
+	} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv(env, value)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("%s=%q accepted, want an error", env, value)
+			}
+			if !strings.Contains(err.Error(), env) {
+				t.Errorf("error %q does not name %s", err, env)
+			}
+		})
+	}
+}

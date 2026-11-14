@@ -18,8 +18,18 @@ import (
 // is enough.
 const DefaultFullEvery = 7 * 24 * time.Hour
 
-// failedRetryAfter caps the wait before retrying after a failed sync.
-const failedRetryAfter = time.Hour
+// DefaultRetryAfter caps the wait before retrying after a failed sync.
+const DefaultRetryAfter = time.Hour
+
+// Settings tunes a Syncer; zero values mean the defaults.
+type Settings struct {
+	// MaxRequests caps the requests one full harvest may make.
+	MaxRequests int
+	// FullEvery is the safety-net interval for full harvests (DefaultFullEvery).
+	FullEvery time.Duration
+	// RetryAfter caps the wait before retrying a failed sync (DefaultRetryAfter).
+	RetryAfter time.Duration
+}
 
 // Syncer keeps the stored shelf in line with Goodreads.
 type Syncer struct {
@@ -27,6 +37,7 @@ type Syncer struct {
 	store       *store.Store
 	maxRequests int
 	fullEvery   time.Duration
+	retryAfter  time.Duration
 	now         func() time.Time
 
 	// OnProgress, if set, is called each time a batch of an initial harvest
@@ -35,14 +46,20 @@ type Syncer struct {
 	OnProgress func()
 }
 
-// New builds a Syncer that harvests with gr (at most maxRequests per full
-// harvest) into st.
-func New(gr *goodreads.Client, st *store.Store, maxRequests int) *Syncer {
+// New builds a Syncer that harvests with gr into st.
+func New(gr *goodreads.Client, st *store.Store, set Settings) *Syncer {
+	if set.FullEvery <= 0 {
+		set.FullEvery = DefaultFullEvery
+	}
+	if set.RetryAfter <= 0 {
+		set.RetryAfter = DefaultRetryAfter
+	}
 	return &Syncer{
 		gr:          gr,
 		store:       st,
-		maxRequests: maxRequests,
-		fullEvery:   DefaultFullEvery,
+		maxRequests: set.MaxRequests,
+		fullEvery:   set.FullEvery,
+		retryAfter:  set.RetryAfter,
 		now:         time.Now,
 	}
 }
@@ -214,14 +231,14 @@ func (s *Syncer) storeSummary() string {
 
 // untilNext returns how long to wait before the next scheduled sync, based on
 // the run log so that restarts do not cause extra scrapes. After a failure the
-// wait is capped at failedRetryAfter.
+// wait is capped at the configured retry wait.
 func (s *Syncer) UntilNext(interval time.Duration) time.Duration {
 	last, ok, err := s.store.LastRun()
 	if err != nil || !ok {
 		return 0
 	}
-	if last.Status == "failed" && interval > failedRetryAfter {
-		interval = failedRetryAfter
+	if last.Status == "failed" && interval > s.retryAfter {
+		interval = s.retryAfter
 	}
 	if d := last.FinishedAt.Add(interval).Sub(s.now()); d > 0 {
 		return d
