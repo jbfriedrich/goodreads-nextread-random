@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -161,7 +162,7 @@ func (g *GraphQL) Lookup(ctx context.Context, ids []string) (map[string]*Book, e
 
 	// Errors scoped to one alias are answers about that book; an error
 	// without a path is about the whole query (schema change, auth, ...).
-	aliasErr := map[string]string{} // alias -> errorType
+	aliasErr := map[string]gqlError{}
 	for _, e := range resp.Errors {
 		alias := ""
 		if len(e.Path) > 0 {
@@ -170,7 +171,7 @@ func (g *GraphQL) Lookup(ctx context.Context, ids []string) (map[string]*Book, e
 		if alias == "" {
 			return nil, fmt.Errorf("%w: %s: %s", ErrGraphQLUnavailable, e.ErrorType, e.Message)
 		}
-		aliasErr[alias] = e.ErrorType
+		aliasErr[alias] = e
 	}
 	if resp.Data == nil && len(aliasErr) == 0 {
 		return nil, fmt.Errorf("%w: response has no data", ErrGraphQLUnavailable)
@@ -180,11 +181,13 @@ func (g *GraphQL) Lookup(ctx context.Context, ids []string) (map[string]*Book, e
 	for i, id := range ids {
 		alias := "b" + strconv.Itoa(i)
 		b, present := resp.Data[alias] // AppSync sends data:null when every alias failed
-		switch errType := aliasErr[alias]; {
-		case errType == "RESOURCE_NOT_FOUND":
+		switch e, failed := aliasErr[alias]; {
+		case e.ErrorType == "RESOURCE_NOT_FOUND":
 			out[id] = nil // Goodreads: "Book is invalid" (removed or merged)
-		case errType != "" || !present:
-			// an error of its own, or no answer: the caller tries the book page
+		case failed:
+			log.Printf("graphql: book %s: %s: %s; trying its book page", id, e.ErrorType, e.Message)
+		case !present:
+			log.Printf("graphql: book %s: no answer in the response; trying its book page", id)
 		case b == nil:
 			out[id] = nil // no such book
 		default:
@@ -233,13 +236,13 @@ func (g *GraphQL) apiKey(ctx context.Context, hintBookID string, refresh bool) (
 			return v, nil
 		}
 	}
-	page, _, err := g.gr.get(ctx, "/book/show/"+hintBookID, nil)
+	page, final, err := g.gr.get(ctx, "/book/show/"+hintBookID, nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("fetching book page of %s for the API key: %w", hintBookID, err)
 	}
 	key, err := apiKeyFromBookPage(page)
 	if err != nil {
-		return "", err
+		return "", pageError(final, page, err)
 	}
 	if err := g.keys.SetSetting(SettingGraphQLKey, key); err != nil {
 		return "", err

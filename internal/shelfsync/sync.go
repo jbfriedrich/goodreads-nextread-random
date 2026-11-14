@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"goodreads-nextread/internal/goodreads"
@@ -108,9 +110,12 @@ func (s *Syncer) Sync(ctx context.Context, forceFull bool) (store.SyncRun, error
 			return finish(nil)
 		case len(unknown) > 0 && len(unknown) < len(newest) && expected == stored+len(unknown):
 			// Only additions: every one of them is in the newest window.
-			if run.Added, _, err = s.store.Reconcile(unknown, false, s.now()); err != nil {
+			ch, err := s.store.Reconcile(unknown, false, s.now())
+			if err != nil {
 				return finish(fmt.Errorf("saving shelf: %w", err))
 			}
+			logChanges(ch)
+			run.Added = len(ch.Added)
 			run.Status = "synced"
 			run.Found = expected
 			return finish(nil)
@@ -128,7 +133,7 @@ func (s *Syncer) Sync(ctx context.Context, forceFull bool) (store.SyncRun, error
 	progressive := stored == 0
 	if progressive {
 		onBatch = func(batch []goodreads.Book) error {
-			if _, _, err := s.store.Reconcile(batch, false, s.now()); err != nil {
+			if _, err := s.store.Reconcile(batch, false, s.now()); err != nil {
 				return fmt.Errorf("saving shelf: %w", err)
 			}
 			if s.OnProgress != nil {
@@ -143,15 +148,19 @@ func (s *Syncer) Sync(ctx context.Context, forceFull bool) (store.SyncRun, error
 		return finish(err)
 	}
 
-	run.Added, run.Removed, err = s.store.Reconcile(res.Books, res.Complete, s.now())
+	ch, err := s.store.Reconcile(res.Books, res.Complete, s.now())
 	if err != nil {
 		return finish(fmt.Errorf("saving shelf: %w", err))
 	}
+	run.Added, run.Removed = len(ch.Added), len(ch.Removed)
 	if progressive {
-		// The batches already inserted everything; count what is there.
+		// The batches already inserted everything; count what is there. The
+		// whole shelf is new, so it is not listed book by book.
 		if run.Added, err = s.store.Count(); err != nil {
 			return finish(err)
 		}
+	} else {
+		logChanges(ch)
 	}
 	run.Status = "synced"
 	if !res.Complete {
@@ -159,6 +168,38 @@ func (s *Syncer) Sync(ctx context.Context, forceFull bool) (store.SyncRun, error
 		log.Printf("warning: harvest found %d of %d books within %d requests; added new books but deleted none", run.Found, run.Expected, run.Requests)
 	}
 	return finish(nil)
+}
+
+// maxLoggedChanges caps how many books one log line names.
+const maxLoggedChanges = 10
+
+// logChanges names the books a sync added and removed, so a change can be
+// traced from the log alone (e.g. a book moved to another shelf).
+func logChanges(ch store.Changes) {
+	if len(ch.Removed) > 0 {
+		log.Printf("removed %d: %s", len(ch.Removed), bookList(ch.Removed))
+	}
+	if len(ch.Added) > 0 {
+		log.Printf("added %d: %s", len(ch.Added), bookList(ch.Added))
+	}
+}
+
+// bookList renders up to maxLoggedChanges books as `"Title" by Author
+// (review 123)`, saying how many more there were.
+func bookList(books []goodreads.Book) string {
+	var parts []string
+	for i, b := range books {
+		if i == maxLoggedChanges {
+			parts = append(parts, fmt.Sprintf("and %d more", len(books)-maxLoggedChanges))
+			break
+		}
+		p := strconv.Quote(b.Title)
+		if b.Author != "" {
+			p += " by " + b.Author
+		}
+		parts = append(parts, p+" (review "+b.ReviewID+")")
+	}
+	return strings.Join(parts, "; ")
 }
 
 // storeSummary describes the stored shelf for log lines.

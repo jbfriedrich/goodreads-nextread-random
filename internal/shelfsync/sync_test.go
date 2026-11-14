@@ -1,8 +1,12 @@
 package shelfsync
 
 import (
+	"bytes"
 	"context"
+	"log"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -340,5 +344,86 @@ func TestSyncLoopRunsAndNotifies(t *testing.T) {
 	}
 	if n, _ := fx.store.Count(); n != 5 {
 		t.Errorf("stored %d books, want 5", n)
+	}
+}
+
+// captureLog redirects the standard logger for the rest of the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	return &buf
+}
+
+func TestSyncLogsRemovedAndAddedBooksByName(t *testing.T) {
+	fx := newSyncFixture(t, 150)
+	fx.sync(t)
+	logs := captureLog(t)
+	fx.f.Remove(10) // "Book 11"
+	fx.f.AddEntry() // "Book 151"
+
+	fx.now = fx.now.Add(6 * time.Hour)
+	fx.sync(t)
+
+	for _, want := range []string{
+		`removed 1: "Book 11" by Author 11 (review 9000000011)`,
+		`added 1: "Book 151" by Author 15 (review 9000000151)`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log does not contain %q:\n%s", want, logs)
+		}
+	}
+}
+
+func TestSyncLogsQuickCheckAdditionsByName(t *testing.T) {
+	fx := newSyncFixture(t, 150)
+	fx.sync(t)
+	logs := captureLog(t)
+	fx.f.AddEntry()
+
+	fx.now = fx.now.Add(6 * time.Hour)
+	if run := fx.sync(t); run.Kind != "quick" {
+		t.Fatalf("run kind = %s, want quick", run.Kind)
+	}
+	if want := `added 1: "Book 151"`; !strings.Contains(logs.String(), want) {
+		t.Errorf("log does not contain %q:\n%s", want, logs)
+	}
+}
+
+func TestSyncInitialHarvestDoesNotListEveryBook(t *testing.T) {
+	fx := newSyncFixture(t, 150)
+	logs := captureLog(t)
+	fx.sync(t)
+	if strings.Contains(logs.String(), `"Book 1" by`) {
+		t.Errorf("initial harvest listed its books one by one:\n%s", logs)
+	}
+}
+
+func TestSyncLogListsAtMostTenBooks(t *testing.T) {
+	fx := newSyncFixture(t, 150)
+	fx.sync(t)
+	logs := captureLog(t)
+	for i := 0; i < 12; i++ {
+		fx.f.AddEntry()
+	}
+
+	fx.now = fx.now.Add(6 * time.Hour)
+	fx.sync(t)
+
+	line := ""
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(l, "added 12:") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no 'added 12:' line in log:\n%s", logs)
+	}
+	if n := strings.Count(line, `"Book `); n != 10 {
+		t.Errorf("line names %d books, want 10: %s", n, line)
+	}
+	if !strings.Contains(line, "and 2 more") {
+		t.Errorf("line does not say how many were left out: %s", line)
 	}
 }

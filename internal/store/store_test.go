@@ -49,15 +49,15 @@ func equalStrings(a, b []string) bool {
 
 func TestReconcileAddsBooks(t *testing.T) {
 	s := newTestStore(t)
-	added, removed, err := s.Reconcile([]goodreads.Book{
+	ch, err := s.Reconcile([]goodreads.Book{
 		{ReviewID: "1", Title: "One", Author: "A", BookID: "11", ImageURL: "https://x/1.jpg"},
 		{ReviewID: "2", Title: "Two", Author: "B"},
 	}, true, t0)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if added != 2 || removed != 0 {
-		t.Errorf("added=%d removed=%d, want 2 and 0", added, removed)
+	if len(ch.Added) != 2 || len(ch.Removed) != 0 {
+		t.Errorf("added=%d removed=%d, want 2 and 0", len(ch.Added), len(ch.Removed))
 	}
 
 	books, err := s.AllBooks()
@@ -80,12 +80,12 @@ func TestReconcileCompleteDeletesBooksNoLongerOnShelf(t *testing.T) {
 	s := newTestStore(t)
 	s.Reconcile([]goodreads.Book{{ReviewID: "1"}, {ReviewID: "2"}, {ReviewID: "3"}}, true, t0)
 
-	added, removed, err := s.Reconcile([]goodreads.Book{{ReviewID: "2"}, {ReviewID: "4"}}, true, t0.Add(time.Hour))
+	ch, err := s.Reconcile([]goodreads.Book{{ReviewID: "2"}, {ReviewID: "4"}}, true, t0.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 1 || removed != 2 {
-		t.Errorf("added=%d removed=%d, want 1 and 2", added, removed)
+	if len(ch.Added) != 1 || len(ch.Removed) != 2 {
+		t.Errorf("added=%d removed=%d, want 1 and 2", len(ch.Added), len(ch.Removed))
 	}
 	if got := reviewIDs(t, s); !equalStrings(got, []string{"2", "4"}) {
 		t.Errorf("review ids = %v, want [2 4]", got)
@@ -96,12 +96,12 @@ func TestReconcilePartialNeverDeletes(t *testing.T) {
 	s := newTestStore(t)
 	s.Reconcile([]goodreads.Book{{ReviewID: "1"}, {ReviewID: "2"}}, true, t0)
 
-	added, removed, err := s.Reconcile([]goodreads.Book{{ReviewID: "3"}}, false, t0.Add(time.Hour))
+	ch, err := s.Reconcile([]goodreads.Book{{ReviewID: "3"}}, false, t0.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if added != 1 || removed != 0 {
-		t.Errorf("added=%d removed=%d, want 1 and 0", added, removed)
+	if len(ch.Added) != 1 || len(ch.Removed) != 0 {
+		t.Errorf("added=%d removed=%d, want 1 and 0", len(ch.Added), len(ch.Removed))
 	}
 	if got := reviewIDs(t, s); !equalStrings(got, []string{"1", "2", "3"}) {
 		t.Errorf("review ids = %v, want [1 2 3]", got)
@@ -113,8 +113,8 @@ func TestReconcileCompleteWithEmptyShelfClearsIt(t *testing.T) {
 	// confirmed the shelf really is empty.
 	s := newTestStore(t)
 	s.Reconcile([]goodreads.Book{{ReviewID: "1"}}, true, t0)
-	if _, removed, err := s.Reconcile(nil, true, t0); err != nil || removed != 1 {
-		t.Fatalf("removed=%d err=%v, want 1 and nil", removed, err)
+	if ch, err := s.Reconcile(nil, true, t0); err != nil || len(ch.Removed) != 1 {
+		t.Fatalf("removed=%d err=%v, want 1 and nil", len(ch.Removed), err)
 	}
 	if n, _ := s.Count(); n != 0 {
 		t.Errorf("Count = %d, want 0", n)
@@ -123,9 +123,33 @@ func TestReconcileCompleteWithEmptyShelfClearsIt(t *testing.T) {
 
 func TestReconcileDeduplicatesInput(t *testing.T) {
 	s := newTestStore(t)
-	added, _, err := s.Reconcile([]goodreads.Book{{ReviewID: "1"}, {ReviewID: "1"}}, true, t0)
-	if err != nil || added != 1 {
-		t.Fatalf("added=%d err=%v, want 1 and nil", added, err)
+	ch, err := s.Reconcile([]goodreads.Book{{ReviewID: "1"}, {ReviewID: "1"}}, true, t0)
+	if err != nil || len(ch.Added) != 1 {
+		t.Fatalf("added=%d err=%v, want 1 and nil", len(ch.Added), err)
+	}
+}
+
+func TestReconcileReportsWhichBooksChanged(t *testing.T) {
+	s := newTestStore(t)
+	s.Reconcile([]goodreads.Book{
+		{ReviewID: "1", Title: "Stays", Author: "A"},
+		{ReviewID: "2", Title: "As You Wake, Break the Shell", Author: "Becky Chambers"},
+	}, true, t0)
+
+	ch, err := s.Reconcile([]goodreads.Book{
+		{ReviewID: "1", Title: "Stays", Author: "A"},
+		{ReviewID: "3", Title: "New Arrival", Author: "C"},
+	}, true, t0.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ch.Added) != 1 || ch.Added[0].ReviewID != "3" || ch.Added[0].Title != "New Arrival" {
+		t.Errorf("Added = %+v, want review 3 \"New Arrival\"", ch.Added)
+	}
+	// The removed book is reported as it was stored, title and author included.
+	if len(ch.Removed) != 1 || ch.Removed[0].ReviewID != "2" ||
+		ch.Removed[0].Title != "As You Wake, Break the Shell" || ch.Removed[0].Author != "Becky Chambers" {
+		t.Errorf("Removed = %+v, want review 2 with its title and author", ch.Removed)
 	}
 }
 

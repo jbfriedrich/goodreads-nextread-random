@@ -42,11 +42,15 @@ func (c *Client) LookupBookID(ctx context.Context, title, author string) (bookID
 
 // BookDetails fetches and parses the public book page.
 func (c *Client) BookDetails(ctx context.Context, bookID string) (Book, error) {
-	body, _, err := c.get(ctx, "/book/show/"+url.PathEscape(bookID), nil)
+	body, final, err := c.get(ctx, "/book/show/"+url.PathEscape(bookID), nil)
 	if err != nil {
-		return Book{}, fmt.Errorf("fetching book page: %w", err)
+		return Book{}, fmt.Errorf("fetching book page of %s: %w", bookID, err)
 	}
-	return parseBookPage(body, bookID)
+	b, err := parseBookPage(body, bookID)
+	if err != nil && !IsNotFound(err) {
+		return Book{}, pageError(final, body, err)
+	}
+	return b, err
 }
 
 type autoCompleteResult struct {

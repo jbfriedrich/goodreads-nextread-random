@@ -149,13 +149,29 @@ Goodreads:
   quick sync unchanged: expected=636 found=636 added=0 removed=0 requests=2 (2s); 636 books stored, 0 awaiting enrichment
   ```
 
+  When books were added or removed, the sync names them first, up to 10 per line
+  (the initial harvest is not listed):
+
+  ```
+  removed 1: "As You Wake, Break the Shell" by Becky Chambers (review 8385834369)
+  added 1: "And the River Drags Her Down" by Jihyun Yun (review 9098829870)
+  ```
+
+  A book that leaves the shelf has usually moved to another one, e.g.
+  `currently-reading`; it keeps its review id there.
+
   Enrichment logs each batch (`enriched 25 books via graphql (611 pending)`) and
-  `enrichment complete` at the end. Watch for these:
+  `enrichment complete` at the end. Errors name the book, the URL and what came
+  back (status, or the page title when a page was not what was expected). Watch
+  for these:
   - `shelf sync failed` (after its retries) means Goodreads is down or changed
     something.
   - A `partial` status means the harvest hit `max_requests` before reaching the
     profile count.
   - `graphql unavailable, using book pages` means the GraphQL API changed.
+  - `blocked by Goodreads' firewall (WAF challenge …)` means Goodreads is
+    challenging the server's IP. The app backs off and retries; it never tries
+    to pass the challenge.
 
 ### Build and push
 

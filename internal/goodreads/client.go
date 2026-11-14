@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -129,7 +131,8 @@ func httpDo(client *http.Client, req *http.Request) ([]byte, *url.URL, error) {
 	defer resp.Body.Close()
 
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	waf := resp.Header.Get("X-Amzn-Waf-Action")
+	if waf != "" || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet := string(body)
 		if len(snippet) > 512 {
 			snippet = snippet[:512]
@@ -141,12 +144,38 @@ func httpDo(client *http.Client, req *http.Request) ([]byte, *url.URL, error) {
 			StatusText: resp.Status,
 			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
 			Body:       snippet,
+			WAFAction:  waf,
 		}
 	}
 	if readErr != nil {
 		return nil, nil, fmt.Errorf("%s %s: reading body: %w", req.Method, redactQuery(req.URL.String()), readErr)
 	}
 	return body, resp.Request.URL, nil
+}
+
+// pageTitle returns a page's <title> (trimmed, at most 80 characters) to
+// identify unexpected pages in error messages.
+func pageTitle(page []byte) string {
+	m := titleRe.FindSubmatch(page)
+	if m == nil {
+		return ""
+	}
+	t := strings.Join(strings.Fields(html.UnescapeString(string(m[1]))), " ")
+	if r := []rune(t); len(r) > 80 {
+		t = string(r[:80]) + "…"
+	}
+	return t
+}
+
+var titleRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+
+// pageError adds the URL and title of an unexpected page to a parse error.
+func pageError(final *url.URL, page []byte, err error) error {
+	where := "?"
+	if final != nil {
+		where = redactQuery(final.String())
+	}
+	return fmt.Errorf("page %s (title %q, %d bytes): %w", where, pageTitle(page), len(page), err)
 }
 
 // redactQuery drops the query string from a URL for log messages.

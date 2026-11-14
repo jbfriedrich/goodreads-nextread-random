@@ -1,7 +1,12 @@
 package goodreads
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"goodreads-nextread/internal/goodreads/goodreadstest"
@@ -23,6 +28,29 @@ func TestParseBookPage(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("parseBookPage =\n %+v\nwant\n %+v", got, want)
+	}
+}
+
+func TestBookDetailsErrorNamesURLAndPageTitle(t *testing.T) {
+	// A 200 page that is not a book page (seen once in production) must be
+	// diagnosable from the log line alone.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "<html><head><title>Something odd</title></head><body>nope</body></html>")
+	}))
+	defer srv.Close()
+	c := NewClient(Options{HTTP: srv.Client(), BaseURL: srv.URL, Sleep: goodreadstest.NoSleep})
+
+	_, err := c.BookDetails(context.Background(), "42")
+	if err == nil {
+		t.Fatal("expected an error for a page without book data")
+	}
+	for _, want := range []string{"/book/show/42", `"Something odd"`, "__NEXT_DATA__"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %s", err, want)
+		}
+	}
+	if IsNotFound(err) {
+		t.Error("an unparseable page must not count as not found")
 	}
 }
 

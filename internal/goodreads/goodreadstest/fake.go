@@ -59,6 +59,10 @@ type Fake struct {
 	// RESOURCE_NOT_FOUND for the alias, the book page is a soft 404 (200,
 	// "Page not found", getBookByLegacyId -> null).
 	Invalid map[string]bool
+	// GQLBookErrors makes GraphQL answer the given book id with an error of
+	// that errorType for its alias (anything but RESOURCE_NOT_FOUND sends the
+	// app to the book page).
+	GQLBookErrors map[string]string
 }
 
 type Entry struct {
@@ -293,6 +297,9 @@ func (f *Fake) serveGraphQL(w http.ResponseWriter, r *http.Request) {
 	matches := gqlAliasRe.FindAllStringSubmatch(req.Query, -1)
 	for _, m := range matches {
 		switch d, ok := f.Books[m[2]]; {
+		case f.GQLBookErrors[m[2]] != "":
+			data[m[1]] = nil
+			errs = append(errs, map[string]any{"path": []any{m[1]}, "errorType": f.GQLBookErrors[m[2]], "message": "Internal failure"})
 		case f.Invalid[m[2]]:
 			data[m[1]] = nil
 			errs = append(errs, map[string]any{"path": []any{m[1]}, "errorType": "RESOURCE_NOT_FOUND", "message": "Book is invalid"})

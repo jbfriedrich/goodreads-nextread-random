@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -16,6 +17,7 @@ type flakyResponse struct {
 	status     int
 	body       string
 	retryAfter string
+	wafAction  string // sent as X-Amzn-Waf-Action, like AWS WAF challenges
 }
 
 func newFlakyClient(t *testing.T, responses ...flakyResponse) (*Client, *[]time.Duration, *int) {
@@ -28,6 +30,9 @@ func newFlakyClient(t *testing.T, responses ...flakyResponse) (*Client, *[]time.
 			resp := responses[i]
 			if resp.retryAfter != "" {
 				w.Header().Set("Retry-After", resp.retryAfter)
+			}
+			if resp.wafAction != "" {
+				w.Header().Set("X-Amzn-Waf-Action", resp.wafAction)
 			}
 			w.WriteHeader(resp.status)
 			fmt.Fprint(w, resp.body)
@@ -43,6 +48,35 @@ func newFlakyClient(t *testing.T, responses ...flakyResponse) (*Client, *[]time.
 		return ctx.Err()
 	}}
 	return c, &waits, &calls
+}
+
+func TestGetTreatsWAFChallengeAsTransient(t *testing.T) {
+	// AWS WAF answers a challenge with a 2xx (202) and a JavaScript page; it
+	// must not be mistaken for the real content.
+	c, _, calls := newFlakyClient(t,
+		flakyResponse{status: http.StatusAccepted, body: "<html>challenge</html>", wafAction: "challenge"})
+	body, _, err := c.get(context.Background(), "/x", nil)
+	if err != nil || string(body) != "ok" {
+		t.Fatalf("get = %q, %v; want ok after retrying the challenge", body, err)
+	}
+	if *calls != 2 {
+		t.Errorf("calls = %d, want 2 (the challenge, then the retry)", *calls)
+	}
+}
+
+func TestWAFChallengeErrorSaysSo(t *testing.T) {
+	var many []flakyResponse
+	for i := 0; i < 10; i++ {
+		many = append(many, flakyResponse{status: http.StatusAccepted, wafAction: "challenge"})
+	}
+	c, _, _ := newFlakyClient(t, many...)
+	_, _, err := c.get(context.Background(), "/x", nil)
+	if err == nil || Classify(err) != ErrTransient {
+		t.Fatalf("err = %v, want a transient error", err)
+	}
+	if !strings.Contains(err.Error(), "WAF challenge") || !strings.Contains(err.Error(), "202") {
+		t.Errorf("error %q should name the WAF challenge and the status", err)
+	}
 }
 
 func TestGetRetriesTransientErrorsWithBackoff(t *testing.T) {

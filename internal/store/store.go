@@ -100,30 +100,57 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
+// Changes lists the books a Reconcile added and removed.
+type Changes struct {
+	Added   []goodreads.Book // as given to Reconcile
+	Removed []goodreads.Book // as they were stored
+}
+
 // Reconcile writes a scrape result. Every book is inserted or has its widget
 // fields (title, author, cover when present) refreshed; enrichment columns are
 // left alone. The widget's book id (taken from the cover file name, which can
 // keep a stale id after Goodreads merges editions) only fills books that are
-// not enriched yet: after enrichment, the verified id wins. Only when complete is true — the scrape collected
-// exactly the number of books the profile reports — are books missing from the
-// result deleted. A partial scrape therefore never shrinks the shelf.
-func (s *Store) Reconcile(books []goodreads.Book, complete bool, now time.Time) (added, removed int, err error) {
+// not enriched yet: after enrichment, the verified id wins. Only when complete
+// is true — the scrape collected exactly the number of books the profile
+// reports — are books missing from the result deleted. A partial scrape
+// therefore never shrinks the shelf.
+func (s *Store) Reconcile(books []goodreads.Book, complete bool, now time.Time) (Changes, error) {
+	var ch Changes
 	tx, err := s.db.Begin()
 	if err != nil {
-		return 0, 0, err
+		return ch, err
 	}
 	defer tx.Rollback()
 
 	if _, err := tx.Exec(`CREATE TEMP TABLE IF NOT EXISTS seen (review_id TEXT PRIMARY KEY); DELETE FROM seen;`); err != nil {
-		return 0, 0, err
+		return ch, err
 	}
 	for _, b := range books {
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO seen (review_id) VALUES (?)`, b.ReviewID); err != nil {
-			return 0, 0, err
+			return ch, err
 		}
 	}
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM seen WHERE review_id NOT IN (SELECT review_id FROM books)`).Scan(&added); err != nil {
-		return 0, 0, err
+	isNew := map[string]bool{}
+	rows, err := tx.Query(`SELECT review_id FROM seen WHERE review_id NOT IN (SELECT review_id FROM books)`)
+	if err != nil {
+		return ch, err
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return ch, err
+		}
+		isNew[id] = true
+	}
+	if err := rows.Close(); err != nil {
+		return ch, err
+	}
+	for _, b := range books {
+		if isNew[b.ReviewID] {
+			ch.Added = append(ch.Added, b)
+			delete(isNew, b.ReviewID) // input may repeat an entry
+		}
 	}
 
 	upsert, err := tx.Prepare(`
@@ -136,28 +163,32 @@ func (s *Store) Reconcile(books []goodreads.Book, complete bool, now time.Time) 
 			image_url    = CASE WHEN excluded.image_url <> '' THEN excluded.image_url ELSE books.image_url END,
 			last_seen_at = excluded.last_seen_at`)
 	if err != nil {
-		return 0, 0, err
+		return ch, err
 	}
 	defer upsert.Close()
 	for _, b := range books {
 		if _, err := upsert.Exec(b.ReviewID, b.BookID, b.Title, b.Author, b.ImageURL, ts(now), ts(now)); err != nil {
-			return 0, 0, err
+			return ch, err
 		}
 	}
 
 	if complete {
-		res, err := tx.Exec(`DELETE FROM books WHERE review_id NOT IN (SELECT review_id FROM seen)`)
+		gone, err := tx.Query(`SELECT ` + bookColumns + ` FROM books WHERE review_id NOT IN (SELECT review_id FROM seen) ORDER BY review_id`)
 		if err != nil {
-			return 0, 0, err
+			return ch, err
 		}
-		n, _ := res.RowsAffected()
-		removed = int(n)
+		if ch.Removed, err = scanBooks(gone); err != nil {
+			return ch, err
+		}
+		if _, err := tx.Exec(`DELETE FROM books WHERE review_id NOT IN (SELECT review_id FROM seen)`); err != nil {
+			return ch, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, 0, err
+		return Changes{}, err
 	}
-	return added, removed, nil
+	return ch, nil
 }
 
 func scanBooks(rows *sql.Rows) ([]goodreads.Book, error) {

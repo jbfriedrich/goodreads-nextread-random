@@ -56,9 +56,16 @@ type httpStatusError struct {
 	StatusText string
 	RetryAfter time.Duration
 	Body       string // start of the body, for diagnosis (e.g. WAF responses)
+	// WAFAction is AWS WAF's X-Amzn-Waf-Action header (e.g. "challenge",
+	// "captcha"). WAF challenges can arrive with a 2xx status; the app never
+	// tries to solve them, it backs off.
+	WAFAction string
 }
 
 func (e *httpStatusError) Error() string {
+	if e.WAFAction != "" {
+		return fmt.Sprintf("%s %s: blocked by Goodreads' firewall (WAF %s, status %s)", e.Method, e.URL, e.WAFAction, e.StatusText)
+	}
 	return fmt.Sprintf("%s %s: unexpected status %s", e.Method, e.URL, e.StatusText)
 }
 
@@ -67,6 +74,8 @@ func Classify(err error) ErrClass {
 	var se *httpStatusError
 	if errors.As(err, &se) {
 		switch {
+		case se.WAFAction != "":
+			return ErrTransient
 		case se.Status == http.StatusUnauthorized:
 			return ErrAuth
 		case se.Status == http.StatusTooManyRequests, se.Status >= 500:
