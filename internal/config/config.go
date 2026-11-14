@@ -1,21 +1,24 @@
+// Package config reads the app's settings from NEXTREAD_* environment
+// variables.
 package config
 
 import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"goodreads-nextread/internal/goodreads"
-
-	"gopkg.in/yaml.v3"
 )
 
-// Defaults for optional config.yaml fields.
+// EnvPrefix starts every setting's environment variable, e.g.
+// NEXTREAD_LIST_URL. serve's command-line flags win over the environment.
+const EnvPrefix = "NEXTREAD_"
+
+// Defaults for the optional settings.
 const (
 	defaultScrapesPerDay = 4
 	defaultDBPath        = "data/nextread.db"
@@ -30,28 +33,23 @@ const (
 	defaultEnrichErrorPause = 5 * time.Minute
 )
 
-// EnvPrefix starts every environment variable that overrides a config.yaml
-// setting: the key in upper case, e.g. NEXTREAD_REQUEST_DELAY for
-// request_delay. The environment wins over the file (which is baked into the
-// Docker image); serve's command-line flags win over both.
-const EnvPrefix = "NEXTREAD_"
-
-// Config holds the runtime configuration derived from config.yaml.
+// Config holds the runtime configuration.
 type Config struct {
-	// BaseURL, UserID and Shelf identify the shelf, parsed from list_url.
+	// BaseURL, UserID and Shelf identify the shelf, parsed from
+	// NEXTREAD_LIST_URL.
 	BaseURL string
 	UserID  string
 	Shelf   string
 
 	// ScrapesPerDay is how often the shelf is checked against Goodreads.
 	ScrapesPerDay int
-	// DBPath is the SQLite database holding the shelf (absolute, or resolved
-	// relative to the config file's directory).
+	// DBPath is the SQLite database holding the shelf (relative paths are
+	// relative to the working directory).
 	DBPath string
 
-	// RequestDelay is the minimum gap between scrape requests.
+	// RequestDelay is the minimum gap between sync requests.
 	RequestDelay time.Duration
-	// EnrichDelay is the gap between book-page lookups for enrichment.
+	// EnrichDelay is the gap between enrichment requests.
 	EnrichDelay time.Duration
 	// MaxRequests caps the requests one full harvest may make.
 	MaxRequests int
@@ -76,108 +74,63 @@ func (c *Config) SyncInterval() time.Duration {
 	return 24 * time.Hour / time.Duration(c.ScrapesPerDay)
 }
 
-// configFile is the on-disk shape of config.yaml.
-type configFile struct {
-	ListURL       string `yaml:"list_url"`
-	ScrapesPerDay *int   `yaml:"scrapes_per_day"`
-	DBPath        string `yaml:"db_path"`
-	RequestDelay  string `yaml:"request_delay"`
-	EnrichDelay   string `yaml:"enrich_delay"`
-	MaxRequests   *int   `yaml:"max_requests"`
-	GraphQL       string `yaml:"graphql_endpoint"`
-
-	HTTPTimeout      string `yaml:"http_timeout"`
-	FullHarvestEvery string `yaml:"full_harvest_every"`
-	SyncRetryAfter   string `yaml:"sync_retry_after"`
-	EnrichErrorPause string `yaml:"enrich_error_pause"`
-
-	// RefreshInterval is the pre-widget setting; it is rejected with a pointer
-	// to its replacement rather than silently ignored.
-	RefreshInterval string `yaml:"refresh_interval"`
-}
-
-// Load reads and validates config.yaml from path, applying NEXTREAD_*
-// environment overrides.
-func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading config file %q: %w", path, err)
+// Load reads and validates the settings from the environment. Only
+// NEXTREAD_LIST_URL is required; an empty variable counts as unset.
+func Load() (*Config, error) {
+	bad := func(env, format string, args ...any) error {
+		return fmt.Errorf("environment variable %s: %s", env, fmt.Sprintf(format, args...))
 	}
 
-	var cf configFile
-	if err := yaml.Unmarshal(data, &cf); err != nil {
-		return nil, fmt.Errorf("parsing config file %q: %w", path, err)
-	}
-	// bad reports an invalid value, naming where it came from: a key in the
-	// file or an environment variable.
-	bad := func(from, format string, args ...any) error {
-		msg := fmt.Sprintf(format, args...)
-		if strings.HasPrefix(from, EnvPrefix) {
-			return fmt.Errorf("environment variable %s: %s", from, msg)
-		}
-		return fmt.Errorf("config file %q: %s: %s", path, from, msg)
-	}
+	cfg := &Config{DBPath: defaultDBPath, GraphQLEndpoint: goodreads.DefaultGraphQLEndpoint}
 
-	if cf.RefreshInterval != "" {
-		return nil, bad("refresh_interval", "no longer supported; set scrapes_per_day (how many times a day the shelf is synced, default %d) instead", defaultScrapesPerDay)
+	listURL, env := lookup("list_url")
+	if listURL == "" {
+		return nil, fmt.Errorf("%s is not set; set it to the shelf URL from your browser, e.g. %s=\"https://www.goodreads.com/review/list/12345678?shelf=to-read\"", env, env)
 	}
-
-	cfg := &Config{
-		DBPath:          defaultDBPath,
-		GraphQLEndpoint: goodreads.DefaultGraphQLEndpoint,
-	}
-
-	listURL, from := pick("list_url", cf.ListURL)
-	if strings.TrimSpace(listURL) == "" {
-		return nil, fmt.Errorf("config file %q is missing required field %q (or set %sLIST_URL)", path, "list_url", EnvPrefix)
-	}
+	var err error
 	if cfg.BaseURL, cfg.UserID, cfg.Shelf, err = parseListURL(listURL); err != nil {
-		return nil, bad(from, "%v", err)
+		return nil, bad(env, "%v", err)
 	}
 
-	if cfg.ScrapesPerDay, err = intSetting("scrapes_per_day", cf.ScrapesPerDay, defaultScrapesPerDay, 1, MaxScrapesPerDay, bad); err != nil {
+	if cfg.ScrapesPerDay, err = intSetting("scrapes_per_day", defaultScrapesPerDay, 1, MaxScrapesPerDay, bad); err != nil {
 		return nil, err
 	}
-	if cfg.MaxRequests, err = intSetting("max_requests", cf.MaxRequests, defaultMaxRequests, goodreads.MinMaxRequests, 0, bad); err != nil {
+	if cfg.MaxRequests, err = intSetting("max_requests", defaultMaxRequests, goodreads.MinMaxRequests, 0, bad); err != nil {
 		return nil, err
 	}
 
 	for _, d := range []struct {
 		key      string
-		file     string
 		fallback time.Duration
 		positive bool // zero is not allowed
 		dst      *time.Duration
 	}{
-		{"request_delay", cf.RequestDelay, defaultRequestDelay, false, &cfg.RequestDelay},
-		{"enrich_delay", cf.EnrichDelay, defaultEnrichDelay, false, &cfg.EnrichDelay},
-		{"http_timeout", cf.HTTPTimeout, defaultHTTPTimeout, true, &cfg.HTTPTimeout},
-		{"full_harvest_every", cf.FullHarvestEvery, defaultFullHarvestEvery, true, &cfg.FullHarvestEvery},
-		{"sync_retry_after", cf.SyncRetryAfter, defaultSyncRetryAfter, true, &cfg.SyncRetryAfter},
-		{"enrich_error_pause", cf.EnrichErrorPause, defaultEnrichErrorPause, true, &cfg.EnrichErrorPause},
+		{"request_delay", defaultRequestDelay, false, &cfg.RequestDelay},
+		{"enrich_delay", defaultEnrichDelay, false, &cfg.EnrichDelay},
+		{"http_timeout", defaultHTTPTimeout, true, &cfg.HTTPTimeout},
+		{"full_harvest_every", defaultFullHarvestEvery, true, &cfg.FullHarvestEvery},
+		{"sync_retry_after", defaultSyncRetryAfter, true, &cfg.SyncRetryAfter},
+		{"enrich_error_pause", defaultEnrichErrorPause, true, &cfg.EnrichErrorPause},
 	} {
-		raw, from := pick(d.key, d.file)
+		raw, env := lookup(d.key)
 		v, err := parseDelay(raw, d.fallback)
 		if err == nil && d.positive && v == 0 {
 			err = fmt.Errorf("must be greater than zero")
 		}
 		if err != nil {
-			return nil, bad(from, "invalid duration %q (a Go duration such as 90s, 15m or 168h): %v", raw, err)
+			return nil, bad(env, "invalid duration %q (a Go duration such as 90s, 15m or 168h): %v", raw, err)
 		}
 		*d.dst = v
 	}
 
-	if p := strings.TrimSpace(cf.DBPath); p != "" {
+	if p, _ := lookup("db_path"); p != "" {
 		cfg.DBPath = p
 	}
-	if !filepath.IsAbs(cfg.DBPath) {
-		cfg.DBPath = filepath.Join(filepath.Dir(path), cfg.DBPath)
-	}
 
-	if ep := strings.TrimSpace(cf.GraphQL); ep != "" {
+	if ep, env := lookup("graphql_endpoint"); ep != "" {
 		u, err := url.Parse(ep)
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-			return nil, bad("graphql_endpoint", "%q is not an http(s) URL", ep)
+			return nil, bad(env, "%q is not an http(s) URL", ep)
 		}
 		cfg.GraphQLEndpoint = ep
 	}
@@ -185,36 +138,28 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// pick returns the environment override for key (NEXTREAD_<KEY>) when it is
-// set and not empty, else the file's value, together with where it came from.
-func pick(key, fileValue string) (value, from string) {
-	env := EnvPrefix + strings.ToUpper(key)
-	if v := strings.TrimSpace(os.Getenv(env)); v != "" {
-		return v, env
-	}
-	return fileValue, key
+// lookup returns the trimmed value of NEXTREAD_<KEY> and the variable's name.
+func lookup(key string) (value, env string) {
+	env = EnvPrefix + strings.ToUpper(key)
+	return strings.TrimSpace(os.Getenv(env)), env
 }
 
-// intSetting resolves an integer setting from the environment or the file,
-// within [min, max] (max 0 means unbounded).
-func intSetting(key string, file *int, fallback, min, max int, bad func(string, string, ...any) error) (int, error) {
-	raw := ""
-	if file != nil {
-		raw = strconv.Itoa(*file)
-	}
-	raw, from := pick(key, raw)
+// intSetting reads an integer setting within [min, max] (max 0 means
+// unbounded).
+func intSetting(key string, fallback, min, max int, bad func(string, string, ...any) error) (int, error) {
+	raw, env := lookup(key)
 	if raw == "" {
 		return fallback, nil
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	n, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0, bad(from, "%q is not a whole number", raw)
+		return 0, bad(env, "%q is not a whole number", raw)
 	}
 	if n < min || (max > 0 && n > max) {
 		if max > 0 {
-			return 0, bad(from, "must be between %d and %d, got %d", min, max, n)
+			return 0, bad(env, "must be between %d and %d, got %d", min, max, n)
 		}
-		return 0, bad(from, "must be at least %d, got %d", min, n)
+		return 0, bad(env, "must be at least %d, got %d", min, n)
 	}
 	return n, nil
 }
@@ -242,11 +187,11 @@ var listPathRe = regexp.MustCompile(`^/review/list(?:_rss)?/(\d+)(?:-[^/]*)?/?$`
 func parseListURL(listURL string) (base, userID, shelf string, err error) {
 	listURL = strings.TrimSpace(listURL)
 	if listURL == "" {
-		return "", "", "", fmt.Errorf("list_url is empty")
+		return "", "", "", fmt.Errorf("the shelf URL is empty")
 	}
 	u, err := url.Parse(listURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return "", "", "", fmt.Errorf("list_url %q is not a valid URL", listURL)
+		return "", "", "", fmt.Errorf("%q is not a valid URL", listURL)
 	}
 	m := listPathRe.FindStringSubmatch(u.Path)
 	if m == nil {
@@ -254,7 +199,7 @@ func parseListURL(listURL string) (base, userID, shelf string, err error) {
 	}
 	shelf = strings.TrimSpace(u.Query().Get("shelf"))
 	if shelf == "" {
-		return "", "", "", fmt.Errorf("list_url %q has no ?shelf=… parameter; add the shelf to pick from, e.g. ?shelf=to-read", listURL)
+		return "", "", "", fmt.Errorf("%q has no ?shelf=… parameter; add the shelf to pick from, e.g. ?shelf=to-read", listURL)
 	}
 	return u.Scheme + "://" + u.Host, m[1], shelf, nil
 }

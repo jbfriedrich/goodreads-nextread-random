@@ -4,7 +4,6 @@ go 1.26.4
 
 require (
 	github.com/PuerkitoBio/goquery v1.13.0
-	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.62.0
 )
 

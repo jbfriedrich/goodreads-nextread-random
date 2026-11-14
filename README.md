@@ -21,7 +21,7 @@ requires a login. The app needs **no login, cookie or account**:
 | `/book/auto_complete` | Finds the book id for the rare entry without a cover. |
 | covers.openlibrary.org | Fallback cover (by ISBN) when Goodreads has none. |
 
-**Syncing** happens `scrapes_per_day` times a day (default 4):
+**Syncing** happens `NEXTREAD_SCRAPES_PER_DAY` times a day (default 4):
 
 - **Quick check (2 requests).** Fetch the profile count and the 100 newest
   entries. If the count matches the stored shelf and every newest entry is known,
@@ -55,37 +55,30 @@ The reader's Goodreads **profile and shelf must be public**.
 
 ## Configure
 
-Edit `config.yaml` and set `list_url` to your shelf URL (copy it from your
-browser address bar):
+Everything is configured with environment variables. Only the shelf is
+required: copy its URL from your browser's address bar.
 
-```yaml
-list_url: "https://www.goodreads.com/review/list/12345678?shelf=to-read"
+```sh
+export NEXTREAD_LIST_URL="https://www.goodreads.com/review/list/12345678?shelf=to-read"
 ```
 
-The shelf and profile must be public.
-
-All other settings are optional. Most can also be set with an environment
-variable, which **overrides** `config.yaml`. That is handy because the file is
-baked into the Docker image. Durations are Go durations such as `90s`, `15m` or
-`168h` (there is no `d` unit).
-
-| `config.yaml` key | Environment variable | Default | Meaning |
-|---|---|---|---|
-| `list_url` | `NEXTREAD_LIST_URL` | (required) | The shelf to pick from |
-| `scrapes_per_day` | `NEXTREAD_SCRAPES_PER_DAY` | `4` | Syncs per day (1–1440) |
-| `request_delay` | `NEXTREAD_REQUEST_DELAY` | `1.5s` | Gap between sync requests |
-| `enrich_delay` | `NEXTREAD_ENRICH_DELAY` | `2s` | Gap between enrichment requests |
-| `max_requests` | `NEXTREAD_MAX_REQUESTS` | `80` | Request cap per full harvest (at least 3) |
-| `http_timeout` | `NEXTREAD_HTTP_TIMEOUT` | `30s` | Timeout of each HTTP request |
-| `full_harvest_every` | `NEXTREAD_FULL_HARVEST_EVERY` | `168h` | Safety-net full harvest, even without changes |
-| `sync_retry_after` | `NEXTREAD_SYNC_RETRY_AFTER` | `1h` | Longest wait before retrying a failed sync |
-| `enrich_error_pause` | `NEXTREAD_ENRICH_ERROR_PAUSE` | `5m` | Enrichment pause after an error whose retries ran out |
-| `db_path` | – | `data/nextread.db` | SQLite file, relative to the config file |
-| `graphql_endpoint` | – | Goodreads' | Only if Goodreads moves its GraphQL API |
-
-Precedence: `serve --scrapes-per-day` beats the environment, which beats
-`config.yaml`, which beats the default. An empty variable counts as unset.
+The shelf and profile must be public. Durations are Go durations such as `90s`,
+`15m` or `168h` (there is no `d` unit). An empty variable counts as unset.
 Invalid values stop the app at startup with an error naming the variable.
+
+| Environment variable | Default | Meaning |
+|---|---|---|
+| `NEXTREAD_LIST_URL` | (required) | The shelf to pick from |
+| `NEXTREAD_SCRAPES_PER_DAY` | `4` | Syncs per day (1–1440); `serve --scrapes-per-day` overrides it |
+| `NEXTREAD_REQUEST_DELAY` | `1.5s` | Gap between sync requests |
+| `NEXTREAD_ENRICH_DELAY` | `2s` | Gap between enrichment requests |
+| `NEXTREAD_MAX_REQUESTS` | `80` | Request cap per full harvest (at least 3) |
+| `NEXTREAD_HTTP_TIMEOUT` | `30s` | Timeout of each HTTP request |
+| `NEXTREAD_FULL_HARVEST_EVERY` | `168h` | Safety-net full harvest, even without changes |
+| `NEXTREAD_SYNC_RETRY_AFTER` | `1h` | Longest wait before retrying a failed sync |
+| `NEXTREAD_ENRICH_ERROR_PAUSE` | `5m` | Enrichment pause after an error whose retries ran out |
+| `NEXTREAD_DB_PATH` | `data/nextread.db` | SQLite file, relative to the working directory (the image sets `/app/data/nextread.db`) |
+| `NEXTREAD_GRAPHQL_ENDPOINT` | Goodreads' | Only if Goodreads moves its GraphQL API |
 
 ## Run
 
@@ -113,11 +106,7 @@ go build -o goodreads-nextread ./cmd/goodreads-nextread
 ./goodreads-nextread
 ```
 
-Use a different config file with `--config`:
-
-```sh
-go run ./cmd/goodreads-nextread --config other.yaml
-```
+All commands expect `NEXTREAD_LIST_URL` to be set (see [Configure](#configure)).
 
 ## Example output
 
@@ -143,9 +132,10 @@ Architecture (one container): **nginx** listens on port 80 and reverse-proxies
 to a small **Go** HTTP server on `127.0.0.1:8080` that renders a random book per
 request. SSL is expected to be terminated upstream by your existing setup.
 
-The shelf settings come from the same `config.yaml`, which is baked into the
-image. The SQLite database lives in `/app/data`. Mount a volume there (the
-compose file does) so the shelf and enrichment survive container rebuilds.
+The container is configured with the same `NEXTREAD_*` environment variables;
+set at least `NEXTREAD_LIST_URL`. The image already points `NEXTREAD_DB_PATH`
+at `/app/data/nextread.db`. Mount a volume on `/app/data` (the compose file
+does) so the shelf and enrichment survive container rebuilds.
 
 **Why the site is fast and never shows auth errors.** Requests never touch
 Goodreads:
@@ -207,6 +197,7 @@ Since your Docker CLI targets your remote server (context `<context>`), a plain
 
 ```sh
 docker run -d --name nextbook --restart unless-stopped -p 8080:80 \
+  -e NEXTREAD_LIST_URL="https://www.goodreads.com/review/list/12345678?shelf=to-read" \
   -v nb_data:/app/data \
   <your-registry>/nextbook:latest
 ```
@@ -216,7 +207,7 @@ at the container's port 80. Health check: `GET /healthz` → `ok`.
 
 ### Configuration knobs
 
-- **Without rebuilding:** set environment variables (see the table under
+- **Settings:** environment variables (see the table under
   [Configure](#configure)), for example in `docker-compose.yaml`:
 
   ```yaml
@@ -225,12 +216,8 @@ at the container's port 80. Health check: `GET /healthz` → `ok`.
         NEXTREAD_SCRAPES_PER_DAY: "6"
         NEXTREAD_HTTP_TIMEOUT: "45s"
   ```
-
-  Or mount your own config over the baked one with
-  `-v /path/to/config.yaml:/app/config.yaml:ro`.
-- **Sync frequency:** `scrapes_per_day` / `NEXTREAD_SCRAPES_PER_DAY` (default 4).
-  The `--scrapes-per-day` flag of `serve` overrides both. The old
-  `refresh_interval` setting is rejected with a pointer to its replacement.
+- **Sync frequency:** `NEXTREAD_SCRAPES_PER_DAY` (default 4). The
+  `--scrapes-per-day` flag of `serve` overrides it.
 - **Listen address:** the server accepts `--addr` (or the `ADDR` env var);
   the default is fine for the container.
 
@@ -259,7 +246,7 @@ internal/
   store/                  the SQLite copy of the shelf and the sync log
   shelfsync/              keeps the store in line with Goodreads (quick check / harvest)
   enrich/                 fills in book details in the background, plus Open Library covers
-  config/                 config.yaml loading and validation
+  config/                 NEXTREAD_* settings: loading and validation
   web/                    the in-memory cache, HTTP handlers and the page template
 deploy/                   nginx config and the container entrypoint
 docs/                     design specs

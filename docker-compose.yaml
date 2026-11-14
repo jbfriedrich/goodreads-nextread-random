@@ -18,8 +18,9 @@ services:
       # volume (not a ./data bind mount) so it also works when the Docker
       # context points at a remote host, where local paths do not exist.
       - nb_data:/app/data
-      # Optional: swap the shelf without rebuilding the image.
-      # - ./config.yaml:/app/config.yaml:ro
+
+    # The app is configured with NEXTREAD_* environment variables (see the
+    # README); NEXTREAD_LIST_URL, the shelf URL, is required.
 
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/healthz"]

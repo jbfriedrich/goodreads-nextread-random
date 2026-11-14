@@ -3,9 +3,8 @@
 # stop the container so the orchestrator's restart policy can recover it.
 set -eu
 
-CONFIG_PATH="${CONFIG_PATH:-/app/config.yaml}"
-
-/usr/local/bin/goodreads-nextread serve --config "$CONFIG_PATH" --addr 127.0.0.1:8080 &
+# Settings come from NEXTREAD_* environment variables (see the README).
+/usr/local/bin/goodreads-nextread serve --addr 127.0.0.1:8080 &
 GO_PID=$!
 
 nginx -g 'daemon off;' &

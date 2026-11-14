@@ -20,12 +20,11 @@ import (
 // serveCmd runs the HTTP server (the `serve` subcommand).
 func serveCmd(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	configPath := fs.String("config", "config.yaml", "path to config file")
 	addr := fs.String("addr", envOr("ADDR", ":8080"), "address to listen on")
-	perDay := fs.Int("scrapes-per-day", 0, "how many times a day to sync the shelf (0 = use config)")
+	perDay := fs.Int("scrapes-per-day", 0, "how many times a day to sync the shelf (0 = use NEXTREAD_SCRAPES_PER_DAY)")
 	fs.Parse(args)
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}

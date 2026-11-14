@@ -13,8 +13,8 @@ import (
 	"goodreads-nextread/internal/store"
 )
 
-func run(configPath string) error {
-	cfg, err := config.Load(configPath)
+func run() error {
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
@@ -43,7 +43,7 @@ func run(configPath string) error {
 		}
 	}
 	if len(books) == 0 {
-		return fmt.Errorf("no books found on the shelf — check list_url in %s", configPath)
+		return fmt.Errorf("no books found on the shelf — check NEXTREAD_LIST_URL")
 	}
 
 	pick := books[rand.Intn(len(books))]
@@ -55,11 +55,10 @@ func run(configPath string) error {
 // It applies the same quick-check logic as the server unless --full is given.
 func syncCmd(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
-	configPath := fs.String("config", "config.yaml", "path to config file")
 	full := fs.Bool("full", false, "always harvest the whole shelf instead of a quick check")
 	fs.Parse(args)
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}

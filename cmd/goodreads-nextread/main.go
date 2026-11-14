@@ -8,6 +8,17 @@ import (
 
 const descriptionMaxLen = 300
 
+func usage() {
+	fmt.Fprint(os.Stderr, `Usage:
+  goodreads-nextread           print a random book from the shelf
+  goodreads-nextread sync      sync the stored shelf with Goodreads (--full: whole shelf)
+  goodreads-nextread serve     run the web server (--addr, --scrapes-per-day)
+
+Configured with environment variables; NEXTREAD_LIST_URL (the shelf URL from
+your browser) is required. See the README for all NEXTREAD_* settings.
+`)
+}
+
 func main() {
 	// `serve` runs the HTTP server, `sync` syncs the shelf once; the default
 	// prints a random book.
@@ -28,10 +39,10 @@ func main() {
 		}
 	}
 
-	configPath := flag.String("config", "config.yaml", "path to config file")
+	flag.Usage = usage
 	flag.Parse()
 
-	if err := run(*configPath); err != nil {
+	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}

@@ -104,7 +104,7 @@ harvest, book pages, GraphQL), `internal/store`, `internal/shelfsync`,
     After that the sync fails (and is retried within 1 h) or enrichment pauses
     for 5 min.
   - **Auth:** 401, which triggers a GraphQL key refresh.
-- **Schedule.** `scrapes_per_day` (default 4), resumed from the `sync_runs` log
+- **Schedule.** `NEXTREAD_SCRAPES_PER_DAY` (default 4), resumed from the `sync_runs` log
   so a restart doesn't trigger an extra scrape.
 - **Serving.** An in-memory `shelfCache` loaded from SQLite, reloaded after each
   sync and each enrichment batch.
@@ -114,7 +114,9 @@ harvest, book pages, GraphQL), `internal/store`, `internal/shelfsync`,
   - **Health:** `/healthz` returns plain `ok`, because it's publicly proxied.
     Sync and enrichment status go to the logs only.
 - **Storage.** `modernc.org/sqlite` (pure Go, so `CGO_ENABLED=0` builds keep
-  working), at `db_path` (default `data/nextread.db`, relative to the config).
+  working), at `NEXTREAD_DB_PATH` (default `data/nextread.db`; the image uses
+  `/app/data/nextread.db`). Since 2026-11-14 all settings are environment
+  variables; there is no config file.
   HTML parsing uses `goquery`.
 
 ## Risks

@@ -15,10 +15,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /goodreads-n
 FROM nginx:alpine
 
 COPY --from=build /goodreads-nextread /usr/local/bin/goodreads-nextread
-COPY config.yaml /app/config.yaml
-# The SQLite copy of the shelf lives here (db_path: data/nextread.db, relative
-# to the config). Mount a volume so it survives container rebuilds; without one
-# the shelf is re-harvested (~1 min) whenever the container is recreated.
+# Settings come from NEXTREAD_* environment variables; NEXTREAD_LIST_URL (the
+# shelf) must be set when the container runs. The SQLite copy of the shelf
+# lives in /app/data: mount a volume there so it survives container rebuilds;
+# without one the shelf is re-harvested (~1 min) whenever the container is
+# recreated.
+ENV NEXTREAD_DB_PATH=/app/data/nextread.db
 RUN mkdir -p /app/data
 VOLUME /app/data
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
