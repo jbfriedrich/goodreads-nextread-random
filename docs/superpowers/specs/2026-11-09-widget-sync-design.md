@@ -1,7 +1,8 @@
 # Goodreads NextRead — Widget sync into SQLite
 
 **Date:** 2026-11-09
-**Status:** Implemented
+**Status:** Implemented. A design record from 2026-11-09, kept as written; the current design
+is in [architecture.md](../../architecture.md), the reasons in [decisions.md](../../decisions.md).
 **Supersedes:** the RSS data source in
 [2026-07-03-goodreads-nextread-design.md](2026-07-03-goodreads-nextread-design.md)
 

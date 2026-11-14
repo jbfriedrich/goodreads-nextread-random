@@ -13,9 +13,19 @@ import (
 )
 
 // DefaultFullEvery is how often a full harvest runs even when quick checks
-// see no change — a safety net for edits the quick check cannot see. The
-// quick check's count arithmetic catches every case known so far, so weekly
-// is enough.
+// see no change. The quick check only compares the shelf count and the review
+// ids of the 100 most recently added entries, so it misses two kinds of change:
+//
+//   - A removal plus an entry that appears outside the newest 100 by "date
+//     added", which leaves the count unchanged. A book moved back to this shelf
+//     from another one keeps its review id (observed), and possibly its original
+//     "date added" (not verified); if so, it sorts far down the shelf.
+//   - Changes to entries that stay on the shelf: a cover that appears later, a
+//     corrected title or author, a cover file name that now carries a different
+//     book id after an edition merge. Enrichment runs once per book, so only
+//     a full harvest refreshes these widget fields.
+//
+// Both are rare, so a weekly full harvest (~40 requests) is enough.
 const DefaultFullEvery = 7 * 24 * time.Hour
 
 // DefaultRetryAfter caps the wait before retrying after a failed sync.
